@@ -56,3 +56,45 @@ subjects:
   - kind: ServiceAccount
     name: kuport-agent
     namespace: kuport-system
+---
+# The built-in view, edit and admin ClusterRoles carry no rules of their own.
+# Each is the union of every ClusterRole labelled for it, so a custom resource
+# reaches them only when its own project ships a labelled role. Without these
+# two, a subject bound to admin in its namespace can create Deployments and
+# Services there and is refused a PortMap, which reads as a broken deployment
+# rather than a missing rule.
+#
+# portmapclasses appears in neither. A class decides which nodes accept traffic,
+# on which interfaces and for which ports, so it stays with whoever administers
+# the cluster. A namespace admin asks for a port; it does not set the terms.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kuport-portmap-view
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/instance: kuport
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-cluster-reader: "true"
+rules:
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["portmaps", "portmaps/status"]
+    verbs: ["get", "list", "watch"]
+---
+# The write verbs only. The read verbs arrive through the view role above, which
+# aggregates into edit and admin as well.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kuport-portmap-edit
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/instance: kuport
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["portmaps"]
+    verbs: ["create", "delete", "deletecollection", "patch", "update"]

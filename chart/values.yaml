@@ -19,6 +19,11 @@ fullnameOverride: ""
 rbac:
   # Create the ClusterRole and ClusterRoleBinding for the agent.
   create: true
+  # Put PortMaps into the built-in view, edit and admin ClusterRoles, so a
+  # subject already bound to one of those in its namespace can work with them.
+  # Set false to decide PortMap access with roles of your own. Classes are
+  # never aggregated either way.
+  aggregate: true
 serviceAccount:
   # Create the ServiceAccount the DaemonSet runs with.
   create: true

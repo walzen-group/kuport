@@ -145,6 +145,47 @@ kubectl -n kuport-system describe daemonset kuport-agent
 Expected result on a healthy install: no FailedCreate events. A line reading
 `violates PodSecurity "baseline:latest"` is the missing label.
 
+### Who may create a PortMap
+
+Both install paths ship two ClusterRoles, kuport-portmap-view and
+kuport-portmap-edit, carrying the aggregation labels for the built-in view,
+edit and admin roles. A subject already bound to one of those in a namespace
+can work with PortMaps there, the same way it can with Deployments and
+Services. Nothing has to be rebound.
+
+The two kinds are scoped so that RBAC splits along the line the design already
+draws.
+
+| Kind | Scope | Held by |
+| --- | --- | --- |
+| PortMapClass | cluster | the cluster's administrator: which nodes accept, on which interfaces, which ports, which namespaces |
+| PortMap | namespaced | the workload: asks for a port on a class |
+
+portmapclasses appears in neither aggregated role, deliberately. A namespace
+admin asks for a port and cannot widen the port range, add an accepting node,
+or admit its own namespace to a class.
+
+serviceRef carries a name and a port and no namespace, so a PortMap always
+resolves its Service in its own namespace. A mapping in one namespace cannot
+be pointed at another namespace's workload.
+
+To grant PortMaps to a subject that is not bound to view, edit or admin, bind
+these roles directly:
+
+```sh
+kubectl -n <namespace> create rolebinding portmap-author \
+  --clusterrole=kuport-portmap-edit \
+  --serviceaccount=<namespace>:<name>
+```
+
+Expected result: `rolebinding.rbac.authorization.k8s.io/portmap-author created`.
+That grants the write verbs; add a second binding to kuport-portmap-view for
+the read verbs.
+
+Set rbac.aggregate to false on the chart to keep PortMaps out of the built-in
+roles and decide access with roles of your own. The plain manifests always
+carry them; delete the two ClusterRoles to opt out there.
+
 ```sh
 kubectl apply -f crds-<version>.yaml
 # plain path:

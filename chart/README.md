@@ -119,7 +119,8 @@ kubectl delete -f chart/crds/
 | image.digest | "" | `sha256:...` pin; when set it wins over the tag |
 | image.pullPolicy | IfNotPresent | Pull policy for the agent container |
 | nameOverride / fullnameOverride | "" | Name parts used by the object names |
-| rbac.create | true | Create the ClusterRole and binding |
+| rbac.create | true | Create the ClusterRole and binding for the agent |
+| rbac.aggregate | true | Put PortMaps into the built-in view, edit and admin roles. Classes are never aggregated |
 | serviceAccount.create | true | Create the ServiceAccount |
 | serviceAccount.name | "" (fullname-agent) | Use this ServiceAccount name, created or pre-existing |
 | logLevel | info | Agent log level, passed as LOG_LEVEL |
