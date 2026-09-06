@@ -7,6 +7,7 @@ package datapath
 
 import (
 	"context"
+	"net"
 
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
@@ -42,6 +43,17 @@ type NetlinkConn interface {
 	RouteListFiltered(family int, filter *netlink.Route, mask uint64) ([]netlink.Route, error)
 }
 
+// underlaySetter is an optional capability a NetlinkConn may provide:
+// re-pointing an existing VXLAN's endpoints in place. realNetlink does;
+// implementations that do not (a fake, or a future handle the kernel would
+// refuse) simply take the rebuild path, which converges on the same state.
+// It is deliberately not part of NetlinkConn: widening that seam would
+// force the change onto every consumer's fake across the packages this one
+// feeds.
+type underlaySetter interface {
+	LinkSetUnderlay(idx int, name string, local, remote net.IP) error
+}
+
 // Handles bundle the two host connections Apply and Teardown need.
 type Handles struct {
 	NFT NFTConn
@@ -61,16 +73,24 @@ func NewHandles() (Handles, error) {
 // Apply makes the host match the Plan. nftables is rewritten in one transaction,
 // so a deleted mapping disappears by absence. netlink has no transaction, so
 // links, rules and routes are reconciled by comparison: what is missing is
-// added, and what kuport finds under its own names and no longer wants is
-// removed. Applying the same Plan twice changes nothing on the second pass.
+// added, what is stale is updated in place, and what kuport finds under its
+// own names and no longer wants is removed. Applying the same Plan twice
+// changes nothing on the second pass.
+//
+// F10: links are brought current before the nftables commit. A failure in the
+// link stage then leaves the old ruleset and no new path: the node refuses
+// rather than DNATs to a remote pod whose return link is not yet live. After
+// the commit, links exist for the rules to use, so the only half-programmed
+// window left is rules-over-a-live-link, which the level-driven requeue
+// closes in seconds.
 func Apply(ctx context.Context, plan Plan, h Handles) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := applyNFT(h.NFT, plan); err != nil {
+	if err := applyLinks(h.NL, plan.Links); err != nil {
 		return err
 	}
-	if err := applyLinks(h.NL, plan.Links); err != nil {
+	if err := applyNFT(h.NFT, plan); err != nil {
 		return err
 	}
 	if err := applyRules(h.NL, plan.IPRules); err != nil {

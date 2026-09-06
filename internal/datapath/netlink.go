@@ -2,9 +2,11 @@ package datapath
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,6 +28,85 @@ func InterfaceMTU(nl NetlinkConn, name string) (int, error) {
 	return link.Attrs().MTU, nil
 }
 
+// underlay is the effective VXLAN underlay read off an existing link: the
+// four params that decide where tunnel traffic actually goes.
+type underlay struct {
+	local  net.IP
+	remote net.IP
+	vni    int
+	port   int
+}
+
+// underlayOf extracts a link's effective underlay: the remote end is carried
+// in Group, which is where vxlanFor puts it and where a kernel dump of a
+// unicast-remote VXLAN reads back. It reports false for a non-VXLAN link:
+// with no underlay to read there is nothing to compare, and kuport must not
+// guess about a device it does not recognise.
+func underlayOf(l netlink.Link) (underlay, bool) {
+	v, ok := l.(*netlink.Vxlan)
+	if !ok {
+		return underlay{}, false
+	}
+	return underlay{local: v.SrcAddr, remote: v.Group, vni: v.VxlanId, port: v.Port}, true
+}
+
+// linkAction is what applyLinks must do with an existing link of the right
+// name. The split mirrors what the kernel actually accepts on a live device
+// (probed on 6.18, and read in drivers/net/vxlan): the two endpoint
+// addresses can be re-sent on a running VXLAN, while VNI and destination
+// port are identity params it refuses to change at all — those need the
+// device rebuilt, which the same apply pass re-addresses and re-routes.
+type linkAction int
+
+const (
+	linkKeep linkAction = iota
+	linkRetarget
+	linkRebuild
+)
+
+// linkActionFor is the F7 decision: an existing link is kept only when every
+// underlay param equals the desired one. A moved InternalIP or moved peer
+// retargets the device in place — the /31 and its routes survive, live
+// traffic does not drop, the index never moves. A re-keyed VNI, a remapped
+// port, or an underlay that cannot be read at all (not a VXLAN, a
+// family-flipped endpoint, a device that was never bound) rebuilds it.
+func linkActionFor(l netlink.Link, want Link) linkAction {
+	have, ok := underlayOf(l)
+	if !ok {
+		return linkRebuild
+	}
+	la, lok := unmap(have.local)
+	ra, rok := unmap(have.remote)
+	if !lok || !rok {
+		return linkRebuild // an underlay we cannot read is not one to keep
+	}
+	wantLocal, wantRemote := want.LocalAddr.Unmap(), want.RemoteAddr.Unmap()
+	if la != wantLocal || ra != wantRemote {
+		if la.Is4() != wantLocal.Is4() || ra.Is4() != wantRemote.Is4() {
+			return linkRebuild // a family flip rebinds the socket
+		}
+		return linkRetarget
+	}
+	if have.vni != int(want.VNI) || have.port != int(want.Port) {
+		return linkRebuild
+	}
+	return linkKeep
+}
+
+// unmap normalises a dumped net.IP (4-byte or v4-in-v6) to a comparable
+// netip.Addr, and reports absence: an endpoint the kernel does not report is
+// not an endpoint that equals the desired one.
+func unmap(ip net.IP) (netip.Addr, bool) {
+	if len(ip) == 0 {
+		return netip.Addr{}, false
+	}
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
 // vxlanFor builds the netlink Vxlan object for a Link: a point-to-point tunnel
 // whose outer header carries the two nodes' own addresses, which the mesh
 // accepts, so no key material is involved.
@@ -40,8 +121,10 @@ func vxlanFor(l Link) *netlink.Vxlan {
 	}
 }
 
-// applyLinks reconciles the VXLAN links: create the missing, address and bring
-// them up, and remove any kup-* link the plan no longer names.
+// applyLinks reconciles the VXLAN links: create the missing, retarget the
+// ones whose underlay has gone stale, rebuild the ones whose identity the
+// kernel cannot change, address and bring them up, and remove any kup-* link
+// the plan no longer names.
 func applyLinks(nl NetlinkConn, links []Link) error {
 	desired := make(map[string]bool, len(links))
 	for _, l := range links {
@@ -54,6 +137,45 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 				return err
 			}
 			existing = v
+		} else {
+			switch linkActionFor(existing, l) {
+			case linkKeep:
+			case linkRetarget:
+				// F7: the endpoints moved — a changed InternalIP on
+				// this node or on the peer. Re-point the existing
+				// device in place; deleting it would tear the
+				// address and routes off the /31 and drop live
+				// traffic, which the level-driven design cannot
+				// afford on every reconcile.
+				if us, ok := nl.(underlaySetter); ok {
+					if err := us.LinkSetUnderlay(existing.Attrs().Index, l.Name,
+						l.LocalAddr.AsSlice(), l.RemoteAddr.AsSlice()); err != nil {
+						return err
+					}
+					break
+				}
+				// A connection without the retarget capability
+				// rebuilds instead: the same state, one index move
+				// further.
+				fallthrough
+			case linkRebuild:
+				// An identity the kernel cannot change on an
+				// existing device (VNI, destination port), or an
+				// underlay we cannot read (not a VXLAN, a family
+				// flip, an endpoint the dump does not report).
+				// Rebuild: this tunnel was not carrying this plan's
+				// traffic anyway; the same apply re-adds the /31
+				// below and applyRoutes — last in Apply — restates
+				// every route the old index dropped.
+				if err := nl.LinkDel(existing); err != nil {
+					return err
+				}
+				v := vxlanFor(l)
+				if err := nl.LinkAdd(v); err != nil {
+					return err
+				}
+				existing = v
+			}
 		}
 
 		addr, err := netlink.ParseAddr(l.LinkAddr.String())
@@ -303,6 +425,44 @@ func (realNetlink) LinkList() ([]netlink.Link, error)            { return netlin
 func (realNetlink) LinkAdd(link netlink.Link) error              { return netlink.LinkAdd(link) }
 func (realNetlink) LinkDel(link netlink.Link) error              { return netlink.LinkDel(link) }
 func (realNetlink) LinkSetUp(link netlink.Link) error            { return netlink.LinkSetUp(link) }
+
+// LinkSetUnderlay retargets an existing VXLAN's endpoints with the smallest
+// netlink message the kernel accepts on a running device: an RTM_NEWLINK
+// naming the device and carrying only the local bind address and the group
+// (the peer's unicast address) in its vxlan info — an existing name routes
+// the request to the kernel's changelink, which starts from the device's
+// current config, so attributes left out keep their values. (RTM_SETLINK
+// does not carry link info at all: it succeeds while changing nothing.)
+// It deliberately does not use netlink.LinkModify: that path re-sends every
+// vxlan attribute at once, and the kernel's changelink rejects the presence
+// of the proxy/rsc/l2miss/l3miss flags outright (vxlan_nl2flag in
+// drivers/net/vxlan), whatever their values — a whole-object modify is
+// therefore guaranteed EOPNOTSUPP.
+func (realNetlink) LinkSetUnderlay(idx int, name string, local, remote net.IP) error {
+	req := nl.NewNetlinkRequest(unix.RTM_NEWLINK, unix.NLM_F_REQUEST|unix.NLM_F_ACK)
+	msg := nl.NewIfInfomsg(unix.AF_UNSPEC)
+	msg.Index = int32(idx)
+	req.AddData(msg)
+	req.AddData(nl.NewRtAttr(unix.IFLA_IFNAME, nl.NonZeroTerminated(name)))
+
+	linkInfo := nl.NewRtAttr(unix.IFLA_LINKINFO, nil)
+	linkInfo.AddRtAttr(nl.IFLA_INFO_KIND, nl.NonZeroTerminated("vxlan"))
+	data := linkInfo.AddRtAttr(nl.IFLA_INFO_DATA, nil)
+	if ip := local.To4(); ip != nil {
+		data.AddRtAttr(nl.IFLA_VXLAN_LOCAL, ip)
+	} else if ip := local.To16(); ip != nil {
+		data.AddRtAttr(nl.IFLA_VXLAN_LOCAL6, ip)
+	}
+	if ip := remote.To4(); ip != nil {
+		data.AddRtAttr(nl.IFLA_VXLAN_GROUP, ip)
+	} else if ip := remote.To16(); ip != nil {
+		data.AddRtAttr(nl.IFLA_VXLAN_GROUP6, ip)
+	}
+	req.AddData(linkInfo)
+
+	_, err := req.Execute(unix.NETLINK_ROUTE, 0)
+	return err
+}
 
 func (realNetlink) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrAdd(link, addr)

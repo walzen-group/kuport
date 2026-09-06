@@ -79,6 +79,26 @@ func (f *fakeNL) LinkSetUp(link netlink.Link) error {
 	return nil
 }
 
+// LinkSetUnderlay re-points the stored VXLAN in place: same object, same
+// index, endpoints moved — mirroring the kernel's live-retarget path.
+func (f *fakeNL) LinkSetUnderlay(idx int, name string, local, remote net.IP) error {
+	f.muts++
+	for _, l := range f.links {
+		v, ok := l.(*netlink.Vxlan)
+		if !ok || v.Index != idx {
+			continue
+		}
+		if len(local) > 0 {
+			v.SrcAddr = local
+		}
+		if len(remote) > 0 {
+			v.Group = remote
+		}
+		return nil
+	}
+	return netlink.LinkNotFoundError{}
+}
+
 func (f *fakeNL) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 	f.muts++
 	name := link.Attrs().Name
