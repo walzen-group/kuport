@@ -208,8 +208,9 @@ spec:
                 type: integer
               published:
                 description: |-
-                  The addresses this port answers on right now, one row per accepting node
-                  and interface. This is what a person needs from `kubectl get portmap`.
+                  The addresses this port answers on right now, one row per class
+                  interface on the mapping's serving node, the node where the DNAT rules
+                  exist. This is what a person needs from `kubectl get portmap`.
                 items:
                   description: |-
                     PublishedAddress is one address the port answers on, on one accepting node

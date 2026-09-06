@@ -110,8 +110,8 @@ spec:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| nodeSelector | label selector | Nodes that accept traffic for this class. Every matching node gets rules. Required. |
-| interfaces | list of string | Interface names the DNAT rules match on, per accepting node. One rule per interface per mapping. Required, at least one. |
+| nodeSelector | label selector | Nodes that may accept traffic for this class: its accepting nodes. Each mapping the class admits is programmed on exactly one of them, its serving node. Required. |
+| interfaces | list of string | Interface names the DNAT rules match on. One rule per interface, on the mapping's serving node. Required, at least one. |
 | ports.min, ports.max | int | The range a PortMap may ask for. Defaults 1, 65535. |
 | ports.reserved | list of int | Ports the admin keeps back. A PortMap naming one is rejected in status. |
 | namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
@@ -180,32 +180,32 @@ status:
 ```
 
 `published` is what a person needs: the addresses this port answers on right
-now, one row per accepting node and interface. It is what `kubectl get portmap`
-prints in its wide columns.
+now, one row per class interface on the mapping's serving node. The DNAT rules
+exist only there, so those are the only addresses where the port answers. It is
+what `kubectl get portmap` prints in its wide columns.
 
-Each row's address comes from the node that bears it. Every accepting agent
-publishes the addresses of the class's interfaces on its node into its
-PortMapClass status row, and the agent that writes the PortMap's status
-resolves the rows from there: this node's rows straight off the host, the
-other nodes' rows from that report. A row whose node has not reported yet
-carries an empty address and fills in on the next pass.
+The serving node writes the mapping's status, and every published row names one
+of its own interfaces, so it resolves each address off its own host. A row whose
+interface has not resolved yet carries an empty address and fills in on the next
+pass.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
 | Accepted | the class exists, selects this namespace, the port range is inside the class range and unreserved, and no earlier mapping holds it | `ClassNotFound`, `NamespaceNotSelected`, `PortOutOfRange`, `PortReserved`, `PortConflict`, `InvalidPortRange` |
-| Programmed | every accepting node has written its rules | `NoReadyEndpoint`, `ReturnPathUnavailable`, `NodeNotReady`, `RemotePodMultipleAcceptingNodes` |
+| Programmed | the serving node has written its rules and its class status row reports ready, and for a pod on another node the return link has landed with usable addresses at both ends | `NoReadyEndpoint`, `ReturnPathUnavailable`, `NodeNotReady` |
 
 `InvalidPortRange` is the ceiling on the CEL rule that endPort must not be
 below port: an update the API server let through still reports here.
 
-`RemotePodMultipleAcceptingNodes` is the refusal described under What the agent
-must refuse: several accepting nodes, one remote pod. The first accepting node
-by name programs the mapping; the others report it.
+`Programmed` gates on the participants: the serving node's row in the class
+status, and for a remote pod the landed link slot. The other accepting nodes
+hold nothing for the mapping, so their rows gate nothing. Until a gate clears,
+the status names what is missing, and the level-driven reconcile heals it.
 
 ### Class status
 
-The class reports which of its nodes are programmed and which return links hold
-an address slot.
+The class reports each selected node's readiness verdict and which return links
+hold an address slot.
 
 ```yaml
 status:
@@ -239,8 +239,10 @@ routing table (`200 + slot`) and the packet mark (`0x6b700000 | slot`), so a
 claim is never renumbered while a link uses it.
 
 One `nodes` row per selected node, written by that node's agent, carrying the
-MTU numbers and interface addresses it read from the host. The Ready condition
-is per class:
+MTU numbers and interface addresses it read from the host. The row is ready when
+every interface the class names resolves to an address on that node; otherwise
+it carries a message naming the first interface that does not. The Ready
+condition is per class:
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
@@ -269,8 +271,8 @@ flowchart LR
     ST --> AP["datapath.Apply"]
     AP --> NFT["one nftables transaction: the whole table kuport is rewritten"]
     AP --> NL["netlink reconcile: kup-* links, ip rules, routes"]
-    SU --> OWN{"this node holds the chosen endpoint?"}
-    OWN -- yes --> PW["patch that PortMap status, propose link claims"]
+    SU --> OWN{"this node is the mapping's serving node?"}
+    OWN -- yes --> PW["patch that PortMap status"]
     OWN -- no --> SKIP["write nothing for that PortMap"]
     PW --> API["API server"]
     API -. "the watch carries it back" .-> W
@@ -282,46 +284,69 @@ tie-break in Compute is deterministic rather than negotiated.
 
 ### The reconcile
 
-Level-driven, not edge-driven. Each pass builds the complete desired state for
+The reconcile is level-driven. Each pass builds the complete desired state for
 this node and applies it in one nftables transaction, so a mapping that was
 deleted disappears by being absent rather than by anything remembering to
 remove it.
 
-For each PortMap whose class selects this node:
+Every agent resolves every PortMap from the same shared inputs, then emits only
+the objects this node owns.
 
-1. Resolve serviceRef to the ready endpoints of the named port.
-2. Choose one. A pod on this node wins. Otherwise the first ready endpoint by
-   pod name, which is stable across agents.
-3. Emit a DNAT rule per interface in the class, rewriting the destination to
-   the chosen pod's address and the same port or port range.
-4. Emit the masquerade exemption for the inbound leg.
-5. If the chosen pod is on another node, ensure the return link to that node
-   exists, and emit nothing else here; the other node's agent owns its half.
+Resolution:
 
-For each PortMap whose chosen endpoint is on this node, and whose accepting node
-is elsewhere:
+1. Resolve serviceRef to the ready IPv4 endpoints of the named port.
+2. Choose one. Candidates on an accepting node rank above all others, ordered by
+   accepting-node name and then by pod name within a node; with no candidate on
+   an accepting node, the ready candidate with the smallest pod name wins. No
+   input describes where the agent runs, so every agent picks the same
+   endpoint.
+3. Fix the serving node: the chosen endpoint's node when that node accepts the
+   class, otherwise the first accepting node by name. Exactly one node serves
+   each mapping.
 
-1. Ensure the return link to the accepting node exists.
-2. Emit the mark rule, the routing rules and the table entry.
-3. Emit the masquerade exemption for the reply.
+Emission on the serving node:
+
+1. A DNAT rule per interface in the class, rewriting the destination to the
+   chosen pod's address and the same port or port range.
+2. The masquerade exemption for the inbound leg.
+3. When the chosen pod is on another node, this end of the return link, once its
+   address slot has landed in the class status.
+
+Emission on the node holding the chosen pod, when another node serves the
+mapping:
+
+1. This end of the return link.
+2. The mark rule, the routing rules and the table entry.
+3. The masquerade exemption for the reply.
+
+Every other node emits nothing for the mapping.
 
 ### Status writing
 
-The agent holding the chosen endpoint writes status. Every other agent writes
-none. That gives exactly one writer per PortMap without leader election, and it
-changes hands when the endpoint moves.
+The mapping's serving node writes its PortMap status; every other agent writes
+none for that mapping. That gives exactly one writer per PortMap without leader
+election, and it changes hands when the endpoint or the accepting set moves. A
+refused or endpoint-less mapping has no serving node, so its status falls to the
+chosen endpoint's node, else the first accepting node by name, else the first
+node in the cluster: one writer in every case.
 
 The class status has its own single-writer rule per field: each node writes its
 own `nodes` row, and only the agent holding a mapping's endpoint proposes a
 `links` claim. Two agents claiming the same pair collide on the API server's
 optimistic concurrency, and the loser re-reads and adopts the winner's slot.
 
+For a remote pod the serving node waits on the pod's node, because the claim
+for their link pair is proposed there. Until it lands in the class status the
+mapping reports `Programmed=False` with reason `ReturnPathUnavailable` and a
+message naming the missing pair. The class status write is itself watched, so
+the serving agent's next pass sees the settled claim and the condition clears.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant T as Target agent worker-b
     participant API as API server
-    participant E as Accepting agent edge-a
+    participant E as Serving agent edge-a
     T->>API: GET portmapclass public
     API-->>T: status.links, no claim for edge-a/worker-b
     Note over T: lowest free slot is 1: 169.254.77.2/31, table 201, mark 0x6b700001
@@ -354,7 +379,7 @@ the same-node case beside it so the machinery that is absent there is visible.
 sequenceDiagram
     autonumber
     participant C as Client
-    participant E as Accepting node edge-a
+    participant E as Serving node edge-a
     participant T as Target node worker-b
     participant P as Pod at 10.244.18.107
     C->>E: request: dst 203.0.113.9:3000, src 198.51.100.7, arrives on enp1s0
@@ -384,7 +409,7 @@ crossing possible.
 sequenceDiagram
     autonumber
     participant C as Client
-    participant N as edge-a, accepting and pod node
+    participant N as edge-a, serving and pod node
     participant P as Pod at 10.244.18.7
     C->>N: request: dst 203.0.113.9:3000, arrives on enp1s0
     Note over N: kup-pre DNAT rewrites dst to the pod address
@@ -419,7 +444,7 @@ cannot work at all. Measured: the DNAT counter climbed, conntrack showed the
 node address as the reply source rather than the pod's, and the pod never saw
 the packet.
 
-### Accepting node
+### The serving node
 
 ```
 table ip kuport {
@@ -436,7 +461,7 @@ table ip kuport {
 
   chain kup-mangle {
     type filter hook prerouting priority mangle + 10; policy accept;
-    ...empty on an accepting node...
+    ...empty on the serving node...
   }
 }
 ```
@@ -467,7 +492,7 @@ This depends on netfilter's once-per-hook behaviour and on kuport's chain
 sorting first, rather than on the text of any Cilium rule, so a Cilium upgrade
 that rewords its masquerade rules does not break it.
 
-### Target node, when it is not the accepting node
+### Target node, when it is not the serving node
 
 ```
 table ip kuport {
@@ -484,9 +509,9 @@ table ip kuport {
 ```
 
 ```
-ip rule  add pref 101 fwmark <mark> to <accepting node address>/32 lookup main
+ip rule  add pref 101 fwmark <mark> to <serving node address>/32 lookup main
 ip rule  add pref 102 fwmark <mark> lookup <table>
-ip route add default via <accepting node link address> dev <link> table <table>
+ip route add default via <serving node link address> dev <link> table <table>
 ```
 
 The postrouting rule exempts the reply from Cilium's egress masquerade, which
@@ -621,14 +646,16 @@ them, and the next start reconciles them away.
 | --- | --- |
 | the CNI is known not to tunnel (Vxlan classes) | report `Ready=False` with `TunnelModeRequired` on the class; the rules are still programmed, so a native-routing cluster shows green mappings whose cross-node traffic dies in the mesh. A mode that cannot be read (no cilium-config) is reported as unknown and refuses nothing |
 | return link port collides with the CNI's | report `Ready=False` with `VxlanPortConflict` on the class |
-| a class selects several accepting nodes and a mapping's pod is remote | program the first accepting node by name, condition on the others |
 
-The last one is a real limitation rather than an oversight. With two accepting
-nodes forwarding to one remote pod, that pod's node has to send each reply back
-to whichever node forwarded it, and the reply carries nothing that says which.
-Making it work needs a distinct port per accepting node and a return rule
-matching source port. It is not needed while an internal class has a pod on
-every accepting node and a public class has one accepting node.
+A class that selects several nodes refuses nothing: each mapping has exactly
+one serving node. Two accepting nodes forwarding to one remote pod would need
+that pod's node to send each reply back to whichever node forwarded it, and
+the reply carries nothing that says which. Making that work needs a distinct
+port per accepting node and a return rule matching source port. The choice and
+the serving node are computed once, from shared inputs, so every other
+accepting node stays outside the mapping: no rules, no status, and no
+refusal. When the first accepting node loses its candidate the mapping fails
+over to the next one.
 
 ## Repo layout
 
@@ -661,9 +688,11 @@ GitHub Actions.
 `go test ./... -race`, `golangci-lint run`, and `go build ./...` under
 `nix develop -c`, so CI and a developer shell use the same toolchain. A second
 job runs `make verify`, which regenerates the CRDs and fails on any diff
-against committed `config/crd/`, so generated files cannot drift. A third
-builds the image for linux/amd64 without pushing, and a fourth lints and
-renders the Helm chart and dry-run applies the render against the API schemas.
+against committed `config/crd/`, so generated files cannot drift. A third job
+runs the envtest tier against a real API server, with the kubebuilder assets
+pinned to 1.37.0. A fourth builds the image for linux/amd64 without pushing,
+and a fifth lints and renders the Helm chart and dry-run applies the render
+against the API schemas.
 
 **release.yaml**, on a tag matching `v*` (plain semver; suffixes are rejected):
 build and push the image to `ghcr.io/walzen-group/kuport-agent`, tagged with the
@@ -672,7 +701,12 @@ Then three artifacts are attached to the GitHub Release:
 `kuport-<version>.yaml`, the rendered `deploy/` tree with the image pinned to
 that digest; `kuport-<version>.tgz`, the packaged chart; and
 `crds-<version>.yaml`, the CRD bundle, because the schemas move on their own
-schedule.
+schedule. The packaged chart is also pushed to `oci://ghcr.io/walzen-group/kuport`
+as an OCI artifact at the release version, with the image digest baked into its
+values, so a GitOps consumer can pull the chart by reference. The chart's own
+image default is the tag `v<appVersion>`, which is the form a release pushes;
+installing the chart from a source checkout needs a published release or an
+explicit tag or digest.
 
 Consumers pin by tag and digest together. The digest is what decides; the tag is
 for people.
@@ -705,7 +739,8 @@ writing no such script is in this repo, and no tier of testing has involved a
 cluster: the build, its tests and its docs all happened without one.
 
 What has actually run: the unit, golden and envtest suites, locally under the
-flake's pinned toolchain. The hand measurements quoted in Datapath above
+flake's pinned toolchain and on every push in GitHub Actions. The hand
+measurements quoted in Datapath above
 predate the code and belong to the rules, not to this implementation.
 
 ## Deployment

@@ -69,8 +69,9 @@ type PortMapStatus struct {
 	// +optional
 	Endpoint *Endpoint `json:"endpoint,omitempty"`
 
-	// The addresses this port answers on right now, one row per accepting node
-	// and interface. This is what a person needs from `kubectl get portmap`.
+	// The addresses this port answers on right now, one row per class
+	// interface on the mapping's serving node, the node where the DNAT rules
+	// exist. This is what a person needs from `kubectl get portmap`.
 	// +optional
 	Published []PublishedAddress `json:"published,omitempty"`
 

@@ -33,7 +33,8 @@ programs nftables and routes to make it so, and follows the pod when it moves.
 
 Built, and not yet run against a cluster. The agent, the API, the CI and the
 deploy artifacts are in this repo; the unit, golden and envtest suites pass
-locally under the pinned toolchain. There was no test cluster while this was
+locally under the pinned toolchain, and GitHub Actions runs the same tiers on
+every push. There was no test cluster while this was
 written, so the end-to-end script the spec describes has not been written
 yet: yours will be the first run of anything, on a real network. The datapath
 rules themselves were proven by hand on a live cluster before the design was
@@ -55,8 +56,9 @@ first issues.
 
 Releases carry three artifacts: `crds-<version>.yaml`, the rendered manifests
 `kuport-<version>.yaml` with the image pinned by digest, and the chart
-`kuport-<version>.tgz`. Apply the CRDs first, then either path. Pin the image
-by tag and digest together; the digest decides.
+`kuport-<version>.tgz`, also pushed as an OCI artifact at
+`oci://ghcr.io/walzen-group/kuport`. Apply the CRDs first, then either path.
+Pin the image by tag and digest together; the digest decides.
 [docs/integration.md](docs/integration.md) walks the full procedure,
 including the four cluster preconditions to check before anything installs.
 

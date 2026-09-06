@@ -20,27 +20,28 @@ kubectl get portmap -n <namespace> <name> -o wide
 ```
 
 Expected result: rows with CLASS, PROTO, PORT, ENDPOINT and, with `-o wide`,
-PUBLISHED. `published` lists the addresses the port answers on right now, one row per
-accepting node and interface. That is the thing to hand to whoever calls in
-from outside. Each row's address comes from the accepting node's own report
-into the class status, so with several accepting nodes a row can carry a blank
-address until that node's agent has reported its row. The node and interface
-names are always complete.
+PUBLISHED. `published` lists the addresses the port answers on right now: one
+row per class interface on the mapping's serving node, the one node where the
+DNAT rules exist. That is the thing to hand to whoever calls in from outside.
+The serving node writes the mapping's status and reads these addresses off its
+own host, so a row can carry a blank address while its interface has not
+resolved; the name is complete from the start and the address fills in on a
+later pass.
 
 What the shapes tell you:
 
 | What you see | What it means |
 | --- | --- |
-| A row with a populated `published` | rules exist on every accepting node for those addresses |
-| `Accepted=True`, `Programmed=False` | the mapping is admissible but at least one node has not programmed it; read the reason |
+| A row with a populated `published` | the DNAT rules exist on the serving node for those addresses |
+| `Accepted=True`, `Programmed=False` | the mapping is admissible but the serving node has not finished writing what the port needs; read the reason |
 | `Accepted=False` | the mapping will never be programmed until the reason is fixed; every reason is a decision the API made about the object |
 | An empty status, nothing in `published`, no conditions | no agent has taken the object. Something is wrong below the mapping: check the DaemonSet |
 
 The last row deserves a sentence of its own: an absent condition is
 information. Every agent that can see the API computes a status owner for
-every PortMap (the endpoint holder, else the first accepting node, else the
-first node), so a PortMap with no status at all means no agent pod is running,
-not that the reconcile skipped it.
+every PortMap (the mapping's serving node, else the chosen endpoint's node,
+else the first accepting node, else the first node), so a PortMap with no
+status at all means no agent pod is running, not that the reconcile skipped it.
 
 The class has its own report:
 
@@ -48,10 +49,10 @@ The class has its own report:
 kubectl get portmapclass <name> -o yaml
 ```
 
-Read `status.nodes` (one row per accepting node: ready, message, the MTU
-numbers and the interface addresses it resolved) and `status.links` (one entry
-per node pair that holds a return-link address slot, with its key, subnet and
-slot).
+Read `status.nodes` (one row per node the class selects: ready, message, the
+MTU numbers and the interface addresses it resolved) and `status.links` (one
+entry per node pair that holds a return-link address slot, with its key,
+subnet and slot).
 
 Logs come from the DaemonSet:
 
@@ -74,11 +75,10 @@ Every reason the code can write, and the first thing to check for each.
 | PortReserved | Accepted | False | the range touches a port in the class `ports.reserved` | reserved is the admin keeping ports back; ask, or pick another port |
 | PortConflict | Accepted | False | an earlier PortMap on the same class overlaps this range; the earlier one wins by creation time, then name | `kubectl get portmap -A` and compare ports per class |
 | InvalidPortRange | Accepted | False | `endPort` is below `port`. The CEL rule on the CRD should have rejected the update, so this reason is a bug report | file it with the object's YAML |
-| AllNodesReady | Programmed | True | every accepting node has written its rules for this mapping | if the port still fails traffic, the fault is outside the rules: see the host firewall and counters |
+| AllNodesReady | Programmed | True | the serving node has written its rules, its row in the class status reports ready, and a remote pod's return link has landed with addresses at both ends | if the port still fails traffic, the fault is outside the rules: see the host firewall and counters |
 | NoReadyEndpoint | Programmed | False | the named port of the referenced Service has no ready endpoint; the DNAT rule is removed, so the port refuses (reset, ICMP unreachable) instead of blackholing | `kubectl -n <ns> get endpointslice -k kubernetes.io/service-name=<svc>`; readiness of the pods |
-| ReturnPathUnavailable | Programmed | False | the pod is on another node and the return link cannot be built: class mode is None, a node has no usable address, or the class subnet has no slot | the class `returnPath`, its Ready condition, and whether the node objects carry addresses |
-| NodeNotReady | Programmed | False | an accepting node's agent has not reported ready, so its half is missing | the DaemonSet pod on that node, the node itself, and the class `nodes[]` row's message |
-| RemotePodMultipleAcceptingNodes | Programmed | False | the class selects several accepting nodes and the pod is on none of them; only the first accepting node by name programs it, this node reports and emits nothing | a design limit, see spec; use one accepting node for remote pods, or a mode None class with a local DaemonSet pod |
+| ReturnPathUnavailable | Programmed | False | the pod is on another node and its return path is not up: the class mode is None, the link pair's claim has not landed in the class status yet, or a node on the path has no usable address. A missing claim is a window that closes by itself while the agents exchange the write; a None mode is a decision | the class `returnPath` and its Ready condition; if the reason repeats beyond a couple of passes, whether the pod's node runs an agent that can propose the claim |
+| NodeNotReady | Programmed | False | the serving node's row in the class status is missing or reports not ready, or the class selects no accepting node at all. The message names the serving node and what its row said, like `serving node edge-a is not ready: interface wt0 not present` | the DaemonSet pod on that node, the node itself, and the class `nodes[]` row's message |
 
 ### PortMapClass conditions
 
@@ -106,10 +106,10 @@ What a climb means, and what a zero means, stage by stage:
 
 | Rule | Counter climbing | Counter stuck at zero |
 | --- | --- | --- |
-| `kup-pre` DNAT (accepting node) | traffic arrives at that interface and port | nothing reaches the node on that tuple: wrong address dialed, the host firewall (see below), or upstream routing. Compare `published` against where the client actually sends |
+| `kup-pre` DNAT (serving node) | traffic arrives at that interface and port | nothing reaches the node on that tuple: wrong address dialed, the host firewall (see below), or upstream routing. Compare `published` against where the client actually sends |
 | `kup-post` with `oifname "cilium_host"` (same-node pod) | the inbound leg is being claimed before Cilium's masquerade; the pod should see the client address | with the DNAT counter climbing, the pod is on another node; look at the target node instead |
-| `kup-mangle` mark rule (target node) | replies from the pod are marked and policy-routed back to the accepting node | the pod's replies do not match src and sport: it replies from another address or port, or it never received the request |
-| `kup-post` with `oifname != "cilium_*"` (target node) | the reply leaves through the return link toward the accepting node | replies are taking some other route: check the ip rule ladder and the link, next sections |
+| `kup-mangle` mark rule (target node) | replies from the pod are marked and policy-routed back to the serving node | the pod's replies do not match src and sport: it replies from another address or port, or it never received the request |
+| `kup-post` with `oifname != "cilium_*"` (target node) | the reply leaves through the return link toward the serving node | replies are taking some other route: check the ip rule ladder and the link, next sections |
 
 A packet that never reaches the DNAT counter is a different problem from one
 that reaches it and never arrives at the pod. The counters split the path at
@@ -199,7 +199,7 @@ What happens to the host state when the agent moves:
 | Clean shutdown (SIGTERM, rolling update, node drain) | the agent removes its nftables table, its kup- links, its routing rules and routes. A node taken out of a class stops holding state nobody wants |
 | Crash (OOM, node power loss) | the rules stay. The next start reconciles: it rewrites the table whole and removes owned objects the new desired state does not name |
 | Rolling update of the DaemonSet | `maxUnavailable: 1`, one node at a time. On each node there is a window of seconds where the table is gone and rebuilt: the port refuses during the window, and established connections through that node are dropped, because flushing the table drops their NAT bindings |
-| Endpoint pod reschedules | the DNAT target changes on the next pass of every accepting node. Old connections do not carry over; the port refuses for the gap and serves again once the new endpoint is ready |
+| Endpoint pod reschedules | every agent recomputes the choice, so the DNAT target changes on the serving node's next pass and another accepting node may take over serving. Old connections do not carry over; the port refuses for the gap and serves again once the new endpoint is ready |
 
 The rollout interruptions are the accepted cost of the NoReadyEndpoint
 decision: refuse fast, never blackhole. If your workload cannot tolerate a

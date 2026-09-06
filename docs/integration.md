@@ -9,11 +9,11 @@ the procedure.
 
 One fact before any step: kuport was built without access to a cluster. Its
 unit, golden and envtest suites pass locally under the project's pinned
-toolchain; the end-to-end script the spec describes has not been written,
-because no cluster was available to write it against. Your cluster will be
-among the first. Verify each step below against the observable it names rather
-than trusting the sequence, and when something refuses to match,
-docs/operations.md is written for exactly that moment.
+toolchain and run again in CI on every push; the end-to-end script the spec
+describes has not been written, because no cluster was available to write it
+against. Your cluster will be among the first. Verify each step below against
+the observable it names rather than trusting the sequence, and when something
+refuses to match, docs/operations.md is written for exactly that moment.
 
 ## Preconditions
 
@@ -111,7 +111,9 @@ Apply the CRDs before either path, from the release's `crds-<version>.yaml`.
 Helm installs its `crds/` directory once and never upgrades it, so the bundle
 is the upgrade path for the schemas either way.
 
-Both artifacts come from a release on the project's GitHub Releases page:
+The two install paths and the CRD bundle come from a release on the project's
+GitHub Releases page; the chart is also pushed to the registry as an OCI
+artifact.
 
 | Artifact | What it is |
 | --- | --- |
@@ -129,7 +131,14 @@ kubectl apply -f crds-<version>.yaml
 kubectl apply -f kuport-<version>.yaml
 # or the chart path:
 helm install kuport kuport-<version>.tgz
+# or the chart straight from the registry:
+helm install kuport oci://ghcr.io/walzen-group/kuport --version <version>
 ```
+
+A chart from a release carries the image digest in its packaged values. The
+chart in a source checkout defaults its image tag to `v<appVersion>`, a tag
+that only exists once the release has run: installing it before that needs an
+explicit tag or digest.
 
 Whichever you take, record the image reference in the form
 `ghcr.io/walzen-group/kuport-agent@sha256:<digest>`. Pin by tag and digest
@@ -211,13 +220,14 @@ spec:
     mode: None
 ```
 
-Why this shape. Every worker accepts, so a remote-pod situation cannot arise
-for a DaemonSet workload: whichever node a client reaches has a pod of its
-own, and the same-node path programs no return machinery at all. With
-`mode: None` the class refuses any mapping whose chosen pod is off the
-accepting node, which is the honest setting rather than a quietly built
-tunnel nobody wanted. A Deployment workload on this class would fail with
-`ReturnPathUnavailable`; give it a Vxlan class or make it a DaemonSet.
+Why this shape. Every worker accepts, so a workload with a pod on each worker
+has a ready candidate on an accepting node, the global endpoint choice lands
+on one of those, and that node serves the mapping from a local pod: the
+same-node path, with no return machinery to build. The port answers on the
+chosen worker's `wt0` address, and the address to dial is the one in the
+mapping's `published`. The class refuses any mapping whose chosen pod sits on
+a node the class does not select, which for this selector means the control
+plane. A workload that may schedule there needs a Vxlan class.
 
 Which fields are decisions and which are defaults:
 
@@ -298,11 +308,10 @@ none of the others can.
    -i any port <port>` at the pod's node: the packets you capture carry your
    source address.
 
-A wrinkle in step 4 to expect, not a fault: each row's address comes from the
-accepting node's own report into the class status, so a row can carry its node
-and interface names with a blank address until that node's agent has reported
-its row. The names are complete from the start; only the address can lag a
-pass.
+A quirk in step 4 to expect, not a fault: the rows name the serving node and
+its class interfaces from the first pass, while an address can stay blank
+until the serving node's agent resolves that interface on its host. The names
+are complete from the start; only the address can lag a pass.
 
 Step 5 is the only one that proves the datapath. Steps 1-4 describe what the
 agents wrote and reported; they can all be green while the port stays shut,
@@ -321,9 +330,9 @@ So you do not go looking for it:
 - Admission webhooks. Conflicts are reported in status, never blocked at
   apply time.
 - Anything in the `filter` table. The host firewall is yours.
-- Several accepting nodes forwarding to one remote pod. The class programs
-  the first accepting node by name and reports
-  `RemotePodMultipleAcceptingNodes` on the others.
+- Serving one mapping from several nodes at once. Exactly one accepting node
+  serves each mapping, chosen from the shared inputs, so the port answers on
+  one node's addresses; the other accepting nodes hold no rules for it.
 - Surviving a rollout with connections intact. Established connections
   through a node drop while its agent restarts, and the port refuses (rather
   than blackholing) while an endpoint has no ready pod.
