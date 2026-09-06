@@ -152,15 +152,17 @@ jobs:
       # unless kuport ships these labels. The second check is the one that
       # matters for tenancy: a class decides which nodes accept traffic and on
       # which ports, so it must never ride into admin on the aggregation.
+      #
+      # The render is the file the previous step wrote. grep and awk come from
+      # the runner, so this step stays outside `nix develop`: the awk program
+      # needs single quotes, and nesting them inside `bash -c '...'` is what
+      # sent a literal backslash to awk and broke the step once already.
       - name: PortMaps aggregate into the built-in roles and classes do not
         run: |
-          nix develop -c bash -c '
-            set -euo pipefail
-            render=.tmp/ci-deploy-render.yaml
-            grep -q "rbac.authorization.k8s.io/aggregate-to-admin" "$render"
-            grep -q "rbac.authorization.k8s.io/aggregate-to-view" "$render"
-            awk "BEGIN{RS=\"---\"} /kuport-portmap-(view|edit)/ \&\& /portmapclasses/ {bad=1} END{exit bad}" "$render"
-          '
+          render=.tmp/ci-deploy-render.yaml
+          grep -q "rbac.authorization.k8s.io/aggregate-to-admin" "$render"
+          grep -q "rbac.authorization.k8s.io/aggregate-to-view" "$render"
+          awk 'BEGIN{RS="---"} /kuport-portmap-(view|edit)/ && /portmapclasses/ {bad=1} END{exit bad}' "$render"
 
       - name: helm lint
         run: nix develop -c helm lint chart/
