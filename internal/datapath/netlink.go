@@ -122,6 +122,44 @@ func vxlanFor(l Link) *netlink.Vxlan {
 	}
 }
 
+// vxlanHolders describes the VXLAN devices already on the node that could
+// explain an EEXIST from a link create. The kernel refuses a second VXLAN
+// carrying a VNI another device already answers for on the same destination
+// port, and it reports only EEXIST, so the name of the device in the way is
+// the one thing an operator needs and cannot get from the error. The returned
+// string is empty when nothing on the node collides, and it always starts with
+// a separator so it can be appended to a message directly.
+func vxlanHolders(nl NetlinkConn, want Link) string {
+	all, err := nl.LinkList()
+	if err != nil {
+		return ""
+	}
+	var clash, other []string
+	for _, l := range all {
+		u, ok := underlayOf(l)
+		if !ok {
+			continue
+		}
+		desc := fmt.Sprintf("%s (vni %d, port %d)", l.Attrs().Name, u.vni, u.port)
+		if u.vni == int(want.VNI) && u.port == int(want.Port) {
+			clash = append(clash, desc)
+			continue
+		}
+		other = append(other, desc)
+	}
+	switch {
+	case len(clash) > 0:
+		return fmt.Sprintf("; vni %d on port %d is already held by %s",
+			want.VNI, want.Port, strings.Join(clash, ", "))
+	case len(other) > 0:
+		return fmt.Sprintf("; no device holds vni %d on port %d, other vxlan devices here: %s",
+			want.VNI, want.Port, strings.Join(other, ", "))
+	default:
+		return fmt.Sprintf("; no vxlan device is present on this node, so vni %d on port %d is held by something the link dump does not report",
+			want.VNI, want.Port)
+	}
+}
+
 // applyLinks reconciles the VXLAN links: create the missing, retarget the
 // ones whose underlay has gone stale, rebuild the ones whose identity the
 // kernel cannot change, address and bring them up, and remove any kup-* link
@@ -135,8 +173,8 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 		if err != nil {
 			v := vxlanFor(l)
 			if err := nl.LinkAdd(v); err != nil {
-				return fmt.Errorf("create link %s (vni %d, port %d, %s to %s): %w",
-					l.Name, l.VNI, l.Port, l.LocalAddr, l.RemoteAddr, err)
+				return fmt.Errorf("create link %s (vni %d, port %d, %s to %s): %w%s",
+					l.Name, l.VNI, l.Port, l.LocalAddr, l.RemoteAddr, err, vxlanHolders(nl, l))
 			}
 			existing = v
 		} else {
