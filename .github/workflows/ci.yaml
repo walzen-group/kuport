@@ -132,6 +132,21 @@ jobs:
 
       - uses: DeterminateSystems/magic-nix-cache-action@v14
 
+      # The agent asks for hostNetwork and NET_ADMIN, which the baseline pod
+      # security standard forbids. On a cluster that enforces baseline by
+      # default the DaemonSet is created and every pod it asks for is
+      # rejected, so it sits at DESIRED with no CURRENT and the failure
+      # appears only in the DaemonSet's events. The namespace has to declare
+      # the privileged level for the agent to schedule at all.
+      - name: The rendered namespace declares the privileged pod security level
+        run: |
+          nix develop -c bash -c '
+            set -euo pipefail
+            mkdir -p .tmp
+            kustomize build deploy/ > .tmp/ci-deploy-render.yaml
+            grep -q "pod-security.kubernetes.io/enforce: privileged" .tmp/ci-deploy-render.yaml
+          '
+
       - name: helm lint
         run: nix develop -c helm lint chart/
 

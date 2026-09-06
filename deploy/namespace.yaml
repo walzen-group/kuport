@@ -5,3 +5,10 @@ metadata:
   labels:
     app.kubernetes.io/name: kuport
     app.kubernetes.io/component: control-plane
+    # The agent runs with hostNetwork and NET_ADMIN, which the baseline
+    # standard forbids. A cluster that enforces baseline by default rejects
+    # every agent pod with "violates PodSecurity" and the DaemonSet reports
+    # DESIRED without CURRENT, so the namespace states its own level.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

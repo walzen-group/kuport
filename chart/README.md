@@ -17,15 +17,38 @@ than patching YAML by hand. Where this chart and `deploy/` disagree,
 
 ## Install
 
-1. Install the release into its own namespace:
+1. Create the namespace with the privileged pod security level:
 
    ```
-   helm install kuport ./chart -n kuport-system --create-namespace
+   kubectl create namespace kuport-system
+   ```
+
+   ```
+   kubectl label namespace kuport-system \
+     pod-security.kubernetes.io/enforce=privileged \
+     pod-security.kubernetes.io/audit=privileged \
+     pod-security.kubernetes.io/warn=privileged
+   ```
+
+   Expected result: `namespace/kuport-system labeled`.
+
+   The agent runs with hostNetwork and NET_ADMIN, which the baseline standard
+   forbids. On a cluster enforcing baseline by default, `helm install
+   --create-namespace` makes an unlabelled namespace, the DaemonSet is accepted,
+   and every pod it asks for is rejected with `violates PodSecurity`. The
+   DaemonSet then reads DESIRED with a CURRENT of 0, and the reason appears only
+   in its events. The manifests under `deploy/` carry these labels on their own
+   Namespace object and need no such step.
+
+2. Install the release into that namespace:
+
+   ```
+   helm install kuport ./chart -n kuport-system
    ```
 
    Expected result: `STATUS: deployed`.
 
-2. Check the rollout:
+3. Check the rollout:
 
    ```
    kubectl -n kuport-system get daemonset kuport-agent
@@ -35,7 +58,7 @@ than patching YAML by hand. Where this chart and `deploy/` disagree,
    tolerates every taint on purpose, so a missing pod means the node is
    unreachable, not tainted.
 
-3. Write your first PortMapClass. The `classes` value creates class objects
+4. Write your first PortMapClass. The `classes` value creates class objects
    with the release, so one values file covers the install and the classes:
 
    ```

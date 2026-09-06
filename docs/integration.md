@@ -125,6 +125,26 @@ The plain manifests are the default. Choose the chart when the `classes`
 value (which creates PortMapClass objects with the release) is easier than a
 second apply, or when your tooling installs charts anyway.
 
+### Pod security
+
+The rendered manifests label their Namespace object
+`pod-security.kubernetes.io/enforce: privileged`. The agent needs it, because
+hostNetwork and NET_ADMIN sit outside the baseline standard. The chart creates
+no namespace of its own, so a chart install labels the namespace before
+installing; the chart's README carries that step.
+
+On a cluster enforcing baseline, a namespace without the label takes the
+DaemonSet and rejects every pod it asks for. It reads as DESIRED with a CURRENT
+of 0, and the DaemonSet's own status says nothing about why. The reason is in
+its events:
+
+```sh
+kubectl -n kuport-system describe daemonset kuport-agent
+```
+
+Expected result on a healthy install: no FailedCreate events. A line reading
+`violates PodSecurity "baseline:latest"` is the missing label.
+
 ```sh
 kubectl apply -f crds-<version>.yaml
 # plain path:
