@@ -1,0 +1,39 @@
+# PortMapClass "public": one edge node by label serves the open internet.
+# Namespaces must carry kuport.dev/public=allowed to reference it.
+apiVersion: kuport.dev/v1alpha1
+kind: PortMapClass
+metadata:
+  name: public
+spec:
+  nodeSelector:
+    matchLabels:
+      kuport.dev/edge: "true"
+  interfaces:
+    - enp1s0
+    - wt0
+  ports:
+    min: 1024
+    max: 65535
+    reserved: [80, 443]
+  namespaceSelector:
+    matchLabels:
+      kuport.dev/public: allowed
+  returnPath:
+    mode: Vxlan
+---
+# PortMapClass "intranet": every worker accepts, and any namespace may ask.
+# returnPath.mode None: a DaemonSet workload has a pod on every accepting node.
+apiVersion: kuport.dev/v1alpha1
+kind: PortMapClass
+metadata:
+  name: intranet
+spec:
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+  interfaces:
+    - wt0
+    - enp1s0
+  returnPath:
+    mode: None

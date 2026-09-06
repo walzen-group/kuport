@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "kuport.agentName" . }}
+  labels:
+    {{- include "kuport.labels" . | nindent 4 }}
+spec:
+  # An agent restart tears down its own rules on shutdown and rebuilds them
+  # on start, so a simultaneous cluster-wide restart would drop every mapping.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "kuport.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kuport.selectorLabels" . | nindent 8 }}
+    spec:
+      # The rules are the node's, not a pod's.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostPID: false
+      serviceAccountName: {{ include "kuport.serviceAccountName" . }}
+      priorityClassName: system-node-critical
+      {{- with .Values.tolerations }}
+      # The class nodeSelector decides which nodes get rules; a taint must not
+      # silently remove a node the admin selected.
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: agent
+        image: {{ include "kuport.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOG_LEVEL
+          value: {{ .Values.logLevel | quote }}
+        # NET_ADMIN is what lets it write nftables and netlink; privileged is
+        # not needed. readOnlyRootFilesystem is safe because the image is a
+        # static binary on scratch with nothing to write. No CPU limit:
+        # throttling a datapath agent mid-reconcile is worse than the
+        # noisy-neighbour risk it prevents.
+        securityContext:
+          runAsNonRoot: false
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: true
+          capabilities:
+            add:
+            - NET_ADMIN
+            drop:
+            - ALL
+          privileged: false
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}

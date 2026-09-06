@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kuport-system
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/component: control-plane

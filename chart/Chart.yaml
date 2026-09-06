@@ -1,0 +1,16 @@
+apiVersion: v2
+name: kuport
+description: Deliver a node's TCP or UDP port to a pod on another node, with the client source address intact
+type: application
+# version and appVersion are rewritten from the git tag by the release
+# workflow. Keep each on its own line.
+version: 0.1.0
+appVersion: 0.1.0
+keywords:
+  - networking
+  - load-balancer
+  - nftables
+  - hostport
+home: https://github.com/walzen-group/kuport
+sources:
+  - https://github.com/walzen-group/kuport

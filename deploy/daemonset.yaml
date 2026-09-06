@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kuport-agent
+  namespace: kuport-system
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/instance: kuport
+spec:
+  # An agent restart tears down its own rules on shutdown and rebuilds them on
+  # start, so a simultaneous cluster-wide restart would drop every mapping.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuport
+      app.kubernetes.io/instance: kuport
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kuport
+        app.kubernetes.io/instance: kuport
+    spec:
+      # The rules are the node's, not a pod's.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostPID: false
+      serviceAccountName: kuport-agent
+      priorityClassName: system-node-critical
+      # The class's nodeSelector decides which nodes get rules; a taint must
+      # not silently remove a node the admin selected.
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: agent
+        image: ghcr.io/walzen-group/kuport-agent:v0.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOG_LEVEL
+          value: "info"
+        # NET_ADMIN is what lets it write nftables and netlink; privileged is
+        # not needed. readOnlyRootFilesystem is safe because the image is a
+        # static binary on scratch with nothing to write. No CPU limit:
+        # throttling a datapath agent mid-reconcile is worse than the
+        # noisy-neighbour risk it prevents.
+        securityContext:
+          privileged: false
+          runAsNonRoot: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            drop:
+            - ALL
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: true
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 128Mi

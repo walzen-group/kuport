@@ -1,0 +1,53 @@
+# Container image settings.
+image:
+  # Repository the agent image is pulled from.
+  repository: ghcr.io/walzen-group/kuport-agent
+  # Image tag. Empty means the chart appVersion.
+  tag: ""
+  # Image digest, like sha256:... . When set it wins over tag, and this is
+  # what a release pins.
+  digest: ""
+  # Pull policy for the agent container.
+  pullPolicy: IfNotPresent
+
+# Overrides for the chart name used in object names.
+nameOverride: ""
+# Overrides the generated release-qualified name entirely.
+fullnameOverride: ""
+
+rbac:
+  # Create the ClusterRole and ClusterRoleBinding for the agent.
+  create: true
+serviceAccount:
+  # Create the ServiceAccount the DaemonSet runs with.
+  create: true
+  # Name to use instead of the generated one. Also works with create false,
+  # to point the DaemonSet at a ServiceAccount you manage elsewhere.
+  name: ""
+
+# Agent log level, passed to the container as LOG_LEVEL. One of debug, info,
+# warn or error.
+logLevel: info
+
+# Compute resources for the agent container. There is deliberately no CPU
+# limit: throttling a datapath agent mid-reconcile is worse than the
+# noisy-neighbour risk a limit prevents.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Taints the agent tolerates. The default tolerates everything, because the
+# PortMapClass nodeSelector decides which nodes get rules and a taint must
+# not silently remove a node the admin selected.
+tolerations:
+  - operator: Exists
+# Extra node labels constraining which nodes run the agent pod. Leave empty
+# to let the classes do the selecting.
+nodeSelector: {}
+
+# PortMapClass objects to create with the release. Each entry is a class
+# name mapped to a PortMapClass spec, passed through as written here.
+classes: {}

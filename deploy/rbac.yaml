@@ -1,0 +1,50 @@
+# The agent reads its inputs and writes only its own status. There is no
+# lease rule: kuport runs one independent agent per node and elects no leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kuport-agent
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/instance: kuport
+rules:
+  - apiGroups: ["kuport.dev"]
+    resources: ["portmapclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kuport.dev"]
+    resources: ["portmapclasses/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["kuport.dev"]
+    resources: ["portmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kuport.dev"]
+    resources: ["portmaps/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kuport-agent
+  labels:
+    app.kubernetes.io/name: kuport
+    app.kubernetes.io/instance: kuport
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kuport-agent
+subjects:
+  - kind: ServiceAccount
+    name: kuport-agent
+    namespace: kuport-system

@@ -1,0 +1,13 @@
+{{- range $name, $spec := .Values.classes }}
+---
+# Rendered verbatim from values.yaml: a PortMapClass named by the map key,
+# with the entry's contents as its spec.
+apiVersion: kuport.dev/v1alpha1
+kind: PortMapClass
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "kuport.labels" $ | nindent 4 }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}

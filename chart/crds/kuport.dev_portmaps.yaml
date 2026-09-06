@@ -1,0 +1,235 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: portmaps.kuport.dev
+spec:
+  group: kuport.dev
+  names:
+    kind: PortMap
+    listKind: PortMapList
+    plural: portmaps
+    shortNames:
+    - pm
+    singular: portmap
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.className
+      name: CLASS
+      type: string
+    - jsonPath: .spec.protocol
+      name: PROTO
+      type: string
+    - jsonPath: .spec.port
+      name: PORT
+      type: integer
+    - jsonPath: .status.endpoint.address
+      name: ENDPOINT
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    - jsonPath: .status.published[*].address
+      name: PUBLISHED
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PortMap is a namespaced request to deliver a port on an accepting node to a
+          pod behind a Service in the same namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PortMapSpec is what a workload asks for: a port on an accepting node of a
+              class, delivered to a pod behind a Service in the same namespace.
+
+              The immutable fields are immutable because changing one is indistinguishable
+              from deleting a mapping and creating another, and the reconcile is simpler if
+              it never has to unwind a half-changed mapping.
+            properties:
+              className:
+                minLength: 1
+                type: string
+              endPort:
+                description: Last port of an inclusive range starting at Port. Omit
+                  for a single port.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              port:
+                description: |-
+                  The port clients dial on an accepting node, and the port the pod
+                  receives on. With EndPort set, the first port of an inclusive range.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              protocol:
+                description: Protocol is the L4 protocol a mapping carries.
+                enum:
+                - TCP
+                - UDP
+                type: string
+              serviceRef:
+                description: ServiceRef names the Service whose endpoints the agent
+                  follows.
+                properties:
+                  name:
+                    description: |-
+                      A Service in the same namespace. Any type, ClusterIP included. It exists
+                      so the agent has endpoints to follow and a named port to resolve.
+                      kuport never modifies it.
+                    type: string
+                  port:
+                    description: The named port on that Service.
+                    type: string
+                required:
+                - name
+                - port
+                type: object
+            required:
+            - className
+            - port
+            - protocol
+            - serviceRef
+            type: object
+            x-kubernetes-validations:
+            - message: className is immutable
+              rule: self.className == oldSelf.className
+            - message: protocol is immutable
+              rule: self.protocol == oldSelf.protocol
+            - message: port is immutable
+              rule: self.port == oldSelf.port
+            - message: endPort is immutable
+              rule: has(self.endPort) == has(oldSelf.endPort) && (!has(self.endPort)
+                || self.endPort == oldSelf.endPort)
+            - message: endPort must be greater than or equal to port
+              rule: '!has(self.endPort) || self.endPort >= self.port'
+          status:
+            description: |-
+              PortMapStatus reports the chosen endpoint, the addresses the port answers on
+              right now, and the mapping's conditions.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              endpoint:
+                description: Endpoint is the pod the mapping currently delivers to.
+                properties:
+                  address:
+                    type: string
+                  node:
+                    type: string
+                required:
+                - address
+                - node
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              published:
+                description: |-
+                  The addresses this port answers on right now, one row per accepting node
+                  and interface. This is what a person needs from `kubectl get portmap`.
+                items:
+                  description: |-
+                    PublishedAddress is one address the port answers on, on one accepting node
+                    and interface.
+                  properties:
+                    address:
+                      type: string
+                    interface:
+                      type: string
+                    node:
+                      type: string
+                  required:
+                  - address
+                  - interface
+                  - node
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
