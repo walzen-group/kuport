@@ -194,13 +194,22 @@ func findCond(conds []metav1.Condition, condType string) metav1.Condition {
 	return metav1.Condition{}
 }
 
-// resolvedMappingFor re-runs the resolution pass and returns the fully
+// resolvedMappingFor re-runs the resolution passes and returns the fully
 // resolved decision for one PortMap, so an agreement test can compare the
-// chosen endpoint and serving node across viewpoints even where the visible
-// Result of a non-owner carries nothing.
+// chosen endpoint, serving node and settled Programmed condition across
+// viewpoints even where the visible Result of a non-owner carries nothing.
+// The gated condition is settled after the slot allocation, exactly as
+// Compute orders them.
 func resolvedMappingFor(in Inputs, namespace, name string) *mapping {
 	idx := newIndex(in)
-	for _, m := range resolveMappings(in, idx) {
+	mappings := resolveMappings(in, idx)
+	needed := neededPairsByClass(mappings)
+	alloc := map[string]classAlloc{}
+	for _, c := range in.Classes {
+		alloc[c.Name] = allocateClass(c, needed[c.Name])
+	}
+	resolveProgrammed(in, idx, mappings, alloc)
+	for _, m := range mappings {
 		if m.pm.Namespace == namespace && m.pm.Name == name {
 			return m
 		}

@@ -191,26 +191,25 @@ func classNodeRow(class *v1alpha1.PortMapClass, name string) *v1alpha1.NodeStatu
 	return nil
 }
 
-// publishedRows lists the addresses a mapping answers on: one row per accepting
-// node and interface. The addresses are left empty here; the agent fills them
-// from the host for this node and from each node's reported row for the others.
+// publishedRows lists the addresses a mapping answers on. Under the
+// 2026-09-06 adjudication that is exactly the serving node S's interfaces:
+// the only places the DNAT rules exist, the only addresses where the port
+// answers. An accepting sibling serves nothing and appears nowhere. The
+// addresses are left empty here; the agent fills them from the host for
+// this node and from the reported row for others (fillPublished).
 func publishedRows(m *mapping) []v1alpha1.PublishedAddress {
-	var rows []v1alpha1.PublishedAddress
-	for _, node := range m.acceptingNodes {
-		for _, iface := range interfacesOf(m.class) {
-			rows = append(rows, v1alpha1.PublishedAddress{
-				Node:      node,
-				Interface: iface,
-				Address:   "",
-			})
-		}
+	if m.serving == "" {
+		return nil
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Node != rows[j].Node {
-			return rows[i].Node < rows[j].Node
-		}
-		return rows[i].Interface < rows[j].Interface
-	})
+	var rows []v1alpha1.PublishedAddress
+	for _, iface := range interfacesOf(m.class) {
+		rows = append(rows, v1alpha1.PublishedAddress{
+			Node:      m.serving,
+			Interface: iface,
+			Address:   "",
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Interface < rows[j].Interface })
 	return rows
 }
 

@@ -109,9 +109,10 @@ type mapping struct {
 	effAccepting string
 	// remote is true when effAccepting must reach the pod across a return link.
 	remote bool
-	// gated marks the accepted, single-accepting-node mapping whose final
-	// Programmed condition resolveProgrammed settles after the slot
-	// allocation is known.
+	// gated marks the accepted, served mapping whose final Programmed
+	// condition resolveProgrammed settles after the slot allocation is
+	// known, on the participants only: S's row and, for a remote pod, the
+	// landed S-holder return-path slot.
 	gated bool
 
 	// programmedCond is the Programmed condition to report, set for accepted
@@ -164,8 +165,8 @@ func Compute(in Inputs) Result {
 		alloc[c.Name] = allocateClass(c, needed[c.Name])
 	}
 
-	// The single-accepting-node mappings deferred their Programmed condition
-	// to the settled rows and slots; decideRole could not see either.
+	// The served mappings deferred their Programmed condition to the
+	// settled rows and slots; decideRole could not see either.
 	resolveProgrammed(in, idx, mappings, alloc)
 
 	// State: the rules, links, marks and routes this node should hold.
@@ -265,17 +266,18 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 }
 
 // resolveProgrammed settles the Programmed condition for the mappings
-// decideRole gated: the single-accepting-node case. True requires every
-// accepting node of the class to report a ready node row and, when the pod
-// is remote, a landed return-path slot whose link both nodes' addresses can
-// build. Until then the status names what is missing; the level-driven
-// requeue heals it and the reported state is honest during the window.
+// decideRole gated. True requires the participants: the serving node S's
+// class node row ready and, when the pod is remote, a landed return-path
+// slot whose link both nodes' addresses can build. Sibling accepting nodes
+// do not serve the mapping and do not gate its condition. Until the gate
+// clears the status names what is missing; the level-driven requeue heals
+// it and the reported state is honest during the window.
 func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[string]classAlloc) {
 	for _, m := range mappings {
 		if !m.gated {
 			continue
 		}
-		if msg, ok := acceptingRowsReady(m); !ok {
+		if msg, ok := servingRowReady(m); !ok {
 			m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNodeNotReady, msg, in.Now)
 			continue
 		}
@@ -298,18 +300,18 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 	}
 }
 
-// acceptingRowsReady reports whether every accepting node of the mapping's
-// class has written a ready row to the class status. The message names the
-// first node that has not, and what its row reported.
-func acceptingRowsReady(m *mapping) (string, bool) {
-	for _, name := range m.acceptingNodes {
-		row := classNodeRow(m.class, name)
-		switch {
-		case row == nil:
-			return fmt.Sprintf("accepting node %s has not reported a class status row", name), false
-		case !row.Ready:
-			return fmt.Sprintf("accepting node %s is not ready: %s", name, row.Message), false
-		}
+// servingRowReady reports whether the mapping's serving node has written a
+// ready row to the class status. Per the 2026-09-06 adjudication this is
+// the whole row gate: the accepting sibling's row is a per-node readiness
+// fact, not a condition on the mapping node-a serves. The message names the
+// serving node and what its row reported.
+func servingRowReady(m *mapping) (string, bool) {
+	row := classNodeRow(m.class, m.serving)
+	switch {
+	case row == nil:
+		return fmt.Sprintf("serving node %s has not reported a class status row", m.serving), false
+	case !row.Ready:
+		return fmt.Sprintf("serving node %s is not ready: %s", m.serving, row.Message), false
 	}
 	return "", true
 }

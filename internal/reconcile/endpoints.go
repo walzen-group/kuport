@@ -1,7 +1,6 @@
 package reconcile
 
 import (
-	"fmt"
 	"sort"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -125,12 +124,13 @@ func strFromPtr(p *string) string {
 // decideRole fixes the serving node for a mapping and this node's Programmed
 // condition. The serving node S is a shared computation: the node holding the
 // chosen endpoint when that node accepts the class, otherwise the first
-// accepting node by name. Exactly S programs the mapping; the adjudicated
-// semantics have every other accepting node report the
-// RemotePodMultipleAcceptingNodes refusal, computed identically here, and
-// only S owns the status (see statusOwner). Programmed=True is deferred to
-// resolveProgrammed for the single-accepting-node case, where it waits on
-// the class node rows and, for a remote pod, the landed return-path slot.
+// accepting node by name. Exactly S programs the mapping and S is the only
+// node that writes the mapping's status (see statusOwner). Accepting nodes
+// that are not S serve nothing: no rules, no status, and — per the 2026-09-06
+// adjudication that a served mapping reports the truth about itself — no
+// refusal. Programmed=True is deferred to resolveProgrammed, where it waits
+// on the participants' readiness: S's class node row and, for a remote pod,
+// the landed return-path slot.
 func decideRole(in Inputs, m *mapping) {
 	// The serving node derives from the shared choice, never from a
 	// node-local preference. It stays "" only when no node accepts, where
@@ -169,15 +169,10 @@ func decideRole(in Inputs, m *mapping) {
 	// S is the sole programming node, local pod or remote.
 	m.effAccepting = m.serving
 
-	if len(m.acceptingNodes) >= 2 {
-		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonRemotePodMultipleAcceptingNodes,
-			fmt.Sprintf("class selects %d accepting nodes; only %s programs this mapping",
-				len(m.acceptingNodes), m.serving), in.Now)
-		return
-	}
-
-	// Single accepting node: True or False is decided against the class
-	// node rows and the return-path slot, both settled after allocation.
+	// Whether the served mapping reads True is decided against the
+	// participants' rows and the return-path slot, both settled after
+	// allocation; sibling accepting nodes are outside the mapping and gate
+	// nothing there.
 	m.gated = true
 }
 

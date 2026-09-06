@@ -10,7 +10,7 @@ const (
 	// unclaimed by an earlier mapping.
 	ConditionAccepted = "Accepted"
 
-	// ConditionProgrammed reports whether every accepting node has written its
+	// ConditionProgrammed reports whether the serving node has written its
 	// rules for the mapping.
 	ConditionProgrammed = "Programmed"
 )
@@ -38,11 +38,10 @@ const (
 
 // PortMap Programmed reasons.
 const (
-	ReasonAllNodesReady                   = "AllNodesReady"
-	ReasonNoReadyEndpoint                 = "NoReadyEndpoint"
-	ReasonReturnPathUnavailable           = "ReturnPathUnavailable"
-	ReasonNodeNotReady                    = "NodeNotReady"
-	ReasonRemotePodMultipleAcceptingNodes = "RemotePodMultipleAcceptingNodes"
+	ReasonAllNodesReady         = "AllNodesReady"
+	ReasonNoReadyEndpoint       = "NoReadyEndpoint"
+	ReasonReturnPathUnavailable = "ReturnPathUnavailable"
+	ReasonNodeNotReady          = "NodeNotReady"
 )
 
 // PortMapClass Ready=False reasons.

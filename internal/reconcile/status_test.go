@@ -53,10 +53,11 @@ func TestStatusOwnedByServingNode(t *testing.T) {
 }
 
 func TestPublishedRows(t *testing.T) {
-	// Two accepting nodes, two interfaces: one Published row per accepting
-	// node and interface. The pod is remote and on neither accepting node,
-	// so the first accepting node by name, node-a, is the serving node and
-	// the status writer.
+	// The 2026-09-06 adjudication narrows Published to the serving node:
+	// rows for S's interfaces only. The pod is remote and on neither
+	// accepting node, so the first accepting node by name, node-a, is the
+	// serving node and status writer; the accepting sibling node-b must
+	// appear nowhere.
 	in := Inputs{
 		NodeName: "node-a",
 		Nodes: []*corev1.Node{
@@ -78,8 +79,6 @@ func TestPublishedRows(t *testing.T) {
 	want := []v1alpha1.PublishedAddress{
 		{Node: "node-a", Interface: "eth0"},
 		{Node: "node-a", Interface: "eth1"},
-		{Node: "node-b", Interface: "eth0"},
-		{Node: "node-b", Interface: "eth1"},
 	}
 	if len(st.Published) != len(want) {
 		t.Fatalf("published rows = %d, want %d: %+v", len(st.Published), len(want), st.Published)

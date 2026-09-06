@@ -134,13 +134,16 @@ func TestRefusals(t *testing.T) {
 			t.Errorf("node-a DNAT = %d, want 1 (the serving node programs)", got)
 		}
 		if got := len(Compute(build("node-b")).State.DNAT); got != 0 {
-			t.Errorf("node-b DNAT = %d, want 0 (the other accepting node is refused)", got)
+			t.Errorf("node-b DNAT = %d, want 0 (the accepting sibling serves nothing)", got)
 		}
-		// The serving node owns the status and reports the limitation; the
-		// endpoint holder contributes only its half of the return path.
+		// The 2026-09-06 adjudication retires the multi-accepting refusal:
+		// this mapping is served, not refused. node-a (S) owns the status and
+		// gates on the participants; no class node row is seeded here, so the
+		// honest reading is False/NodeNotReady naming S, not a refusal and not
+		// True. The endpoint holder contributes only its half of the return path.
 		c := programmedOf(Compute(build("node-a")), "games", "a")
-		if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonRemotePodMultipleAcceptingNodes {
-			t.Fatalf("Programmed = %s/%s, want False/RemotePodMultipleAcceptingNodes", c.Status, c.Reason)
+		if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonNodeNotReady {
+			t.Fatalf("Programmed = %s/%s, want False/NodeNotReady while node-a has not reported", c.Status, c.Reason)
 		}
 	})
 }
@@ -229,11 +232,14 @@ func TestAgentAgreement(t *testing.T) {
 	}
 }
 
-// multiAcceptingWorld is the F1 shape: a Service with ready endpoints on two
-// accepting nodes (node-a, node-b) and a claim between them. The deterministic
-// rule puts the chosen endpoint on the lexicographically first accepting node
-// (node-a, whose pod is named higher), so node-a serves locally and no return
-// link is needed.
+// multiAcceptingWorld is the F1 shape under the adjudicated semantics: a
+// Service with ready endpoints on two accepting nodes (node-a, node-b) and a
+// claim between them. The deterministic rule puts the chosen endpoint on the
+// lexicographically first accepting node (node-a, whose pod is named higher),
+// so node-a serves locally and no return link is needed. The class status
+// carries S's ready row and the accepting sibling's not-ready row: under the
+// 2026-09-06 adjudication (a served mapping reports the truth about itself)
+// the sibling gates nothing, so every viewpoint settles on Programmed=True.
 func multiAcceptingWorld(runOn string) Inputs {
 	return Inputs{
 		NodeName: runOn,
@@ -244,7 +250,11 @@ func multiAcceptingWorld(runOn string) Inputs {
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
 		Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
-			withLinks(claim("node-a", "node-b", 0)))},
+			withLinks(claim("node-a", "node-b", 0)),
+			withNodeRows(
+				v1alpha1.NodeStatus{Name: "node-a", Ready: true},
+				v1alpha1.NodeStatus{Name: "node-b", Ready: false, Message: "interface eth1 not present"},
+			))},
 		PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a",
@@ -256,12 +266,12 @@ func multiAcceptingWorld(runOn string) Inputs {
 	}
 }
 
-// TestAgentAgreementMultiAccepting extends the TestAgentAgreement shape to the
-// F1 fixture: with ready endpoints on two accepting nodes every viewpoint must
-// pick the same endpoint (the one on node-a, the first accepting node, even
-// though node-b's pod is named lower), exactly one node programs, the other
-// accepting node contributes no rules and computes the refusal, and only the
-// serving node owns the PortMap status.
+// TestAgentAgreementMultiAccepting extends the TestAgentAgreement shape to
+// the F1 fixture under the 2026-09-06 adjudication: every viewpoint must pick
+// the same endpoint (the one on node-a, the first accepting node, even though
+// node-b's pod is named lower), exactly one node programs, the accepting
+// sibling contributes no rules and gates nothing, and only the serving node
+// owns the PortMap status.
 func TestAgentAgreementMultiAccepting(t *testing.T) {
 	a := Compute(multiAcceptingWorld("node-a"))
 	b := Compute(multiAcceptingWorld("node-b"))
@@ -279,9 +289,9 @@ func TestAgentAgreementMultiAccepting(t *testing.T) {
 	// The bystander contributes nothing.
 	assertCounts(t, c.State, counts{})
 
-	// The refusal is the shared computation: node-a, the serving node, owns
-	// the status and reports it; node-b computes the same refusal but writes
-	// no status because only S owns the mapping.
+	// The served reading is the shared computation: node-a owns the status
+	// and reports True on its ready row and local pod; node-b computes the
+	// same verdict but writes no status because only S owns the mapping.
 	if hasStatus(b, "games", "a") {
 		t.Error("node-b is not the serving node and must not write the mapping's status")
 	}
@@ -289,15 +299,15 @@ func TestAgentAgreementMultiAccepting(t *testing.T) {
 		t.Fatal("node-a is the serving node and must write the mapping's status")
 	}
 	want := multiStatusCondition(t, a)
-	if want.Status != metav1.ConditionFalse || want.Reason != v1alpha1.ReasonRemotePodMultipleAcceptingNodes {
-		t.Errorf("node-a Programmed = %s/%s, want False/RemotePodMultipleAcceptingNodes", want.Status, want.Reason)
+	if want.Status != metav1.ConditionTrue || want.Reason != v1alpha1.ReasonAllNodesReady {
+		t.Errorf("node-a Programmed = %s/%s, want True/AllNodesReady (a served mapping reports the truth about itself)", want.Status, want.Reason)
 	}
 	if st := a.PortMapStatus[types.NamespacedName{Namespace: "games", Name: "a"}]; st.Endpoint == nil || st.Endpoint.Address != "10.244.7.7" {
 		t.Errorf("written status endpoint = %+v, want 10.244.7.7", st.Endpoint)
 	}
 
 	// The shared computation, viewpoint by viewpoint: same endpoint, same
-	// serving node, same refusal condition everywhere.
+	// serving node, same Programmed condition everywhere.
 	for _, runOn := range []string{"node-a", "node-b", "node-c"} {
 		m := resolvedMappingFor(multiAcceptingWorld(runOn), "games", "a")
 		if m == nil {
@@ -309,9 +319,9 @@ func TestAgentAgreementMultiAccepting(t *testing.T) {
 		if m.serving != "node-a" {
 			t.Errorf("world(%s): serving node = %q, want node-a", runOn, m.serving)
 		}
-		if m.programmedCond.Status != metav1.ConditionFalse ||
-			m.programmedCond.Reason != v1alpha1.ReasonRemotePodMultipleAcceptingNodes {
-			t.Errorf("world(%s): Programmed = %s/%s, want False/RemotePodMultipleAcceptingNodes",
+		if m.programmedCond.Status != metav1.ConditionTrue ||
+			m.programmedCond.Reason != v1alpha1.ReasonAllNodesReady {
+			t.Errorf("world(%s): Programmed = %s/%s, want True/AllNodesReady",
 				runOn, m.programmedCond.Status, m.programmedCond.Reason)
 		}
 	}
@@ -329,7 +339,9 @@ func multiStatusCondition(t *testing.T, res Result) metav1.Condition {
 // TestServingNodeIsChosenPodsNode is the F3 case the old code refused outright:
 // the class selects node-a and node-b, the only ready pod sits on node-b, the
 // second accepting node. node-b is the serving node, programs its local pod,
-// and the earlier accepting node is the refused one.
+// and the earlier accepting node serves nothing. Under the 2026-09-06
+// adjudication node-b's served mapping reads True on its own ready row; the
+// sibling node-a reports nothing and gates nothing.
 func TestServingNodeIsChosenPodsNode(t *testing.T) {
 	world := func(runOn string) Inputs {
 		return Inputs{
@@ -340,7 +352,8 @@ func TestServingNodeIsChosenPodsNode(t *testing.T) {
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
 			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
-				withLinks(claim("node-a", "node-b", 0)))},
+				withLinks(claim("node-a", "node-b", 0)),
+				withNodeRows(v1alpha1.NodeStatus{Name: "node-b", Ready: true}))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.8.8", node: "node-b", target: "pod-alpha"}),
@@ -361,14 +374,63 @@ func TestServingNodeIsChosenPodsNode(t *testing.T) {
 	a := Compute(world("node-a"))
 	assertCounts(t, a.State, counts{})
 
-	// node-b is S, owns the status, and reports the multi-accepting refusal.
+	// node-b is S, owns the status, and reports the served mapping True.
 	c := programmedOf(b, "games", "a")
-	if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonRemotePodMultipleAcceptingNodes {
-		t.Errorf("node-b Programmed = %s/%s, want False/RemotePodMultipleAcceptingNodes", c.Status, c.Reason)
+	if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonAllNodesReady {
+		t.Errorf("node-b Programmed = %s/%s, want True/AllNodesReady (a served mapping reports the truth about itself)", c.Status, c.Reason)
 	}
 	if hasStatus(a, "games", "a") {
 		t.Error("node-a is not the serving node and must not write status")
 	}
+}
+
+// TestMultiAcceptRemotePodWindow is the adjudicated remote case: the class
+// selects two accepting nodes (node-a, node-b), the chosen pod sits on a
+// third (node-c), and node-a — the first accepting node — serves across the
+// return path. Before the S-holder claim lands the mapping reports honestly
+// (not True; ReturnPathUnavailable, task-8's window reason); once it lands
+// it reads True/AllNodesReady while the sibling node-b reports no row and
+// gates nothing.
+func TestMultiAcceptRemotePodWindow(t *testing.T) {
+	world := func(runOn string, links ...v1alpha1.LinkAllocation) Inputs {
+		return Inputs{
+			NodeName: runOn,
+			Nodes: []*corev1.Node{
+				node("node-a", "10.0.0.1", map[string]string{"edge": "true"}),
+				node("node-b", "10.0.0.2", map[string]string{"edge": "true"}),
+				node("node-c", "10.0.0.3", nil),
+			},
+			Namespaces: []*corev1.Namespace{ns("games", nil)},
+			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+				withLinks(links...),
+				// Only the participant S reports a row; the sibling is absent.
+				withNodeRows(v1alpha1.NodeStatus{Name: "node-a", Ready: true}))},
+			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
+			Slices: []*discoveryv1.EndpointSlice{
+				slice("games", "a", endpointSpec{addr: "10.244.9.9", node: "node-c", target: "pod-a"}),
+			},
+			Now: metav1.NewTime(baseTime),
+		}
+	}
+
+	t.Run("unlanded claim", func(t *testing.T) {
+		c := programmedOf(Compute(world("node-a")), "games", "a")
+		if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonReturnPathUnavailable {
+			t.Errorf("window Programmed = %s/%s, want False/ReturnPathUnavailable", c.Status, c.Reason)
+		}
+	})
+
+	t.Run("landed claim", func(t *testing.T) {
+		links := []v1alpha1.LinkAllocation{claim("node-a", "node-c", 0)}
+		res := Compute(world("node-a", links...))
+		c := programmedOf(res, "games", "a")
+		if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonAllNodesReady {
+			t.Errorf("after landing Programmed = %s/%s, want True/AllNodesReady", c.Status, c.Reason)
+		}
+		if len(res.State.DNAT) != 1 || len(res.State.Links) != 1 {
+			t.Errorf("node-a state = %+v, want DNAT plus the return link", res.State)
+		}
+	})
 }
 
 // windowWorld is a single accepting node (node-a) with the pod on node-b.
