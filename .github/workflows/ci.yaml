@@ -1,0 +1,120 @@
+# CI for kuport. Every job except image runs the flake's toolchain through
+# `nix develop -c`, so CI and a developer's shell execute identical versions
+# of go, golangci-lint, helm, and friends. There is no per-tool setup action
+# to drift from the flake.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to the same ref supersedes an in-progress CI run. CI is
+# reproducible from the commit, so cancelling the older run loses nothing.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: cachix/install-nix-action@v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: go vet
+        run: nix develop -c go vet ./...
+
+      - name: go test
+        run: nix develop -c go test ./... -race
+
+      - name: golangci-lint
+        run: nix develop -c golangci-lint run
+
+      - name: go build
+        run: nix develop -c go build ./...
+
+  generated:
+    name: Generated files match source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: cachix/install-nix-action@v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      # make verify regenerates the CRDs into .tmp/crd and exits non-zero on
+      # any diff against committed config/crd. This job must fail the build,
+      # not warn, so there is no continue-on-error on it and the step is kept
+      # plain: a green CI with drifted generated files is the exact state
+      # this job exists to prevent. The Makefile enters the flake itself
+      # (every recipe runs under `nix develop -c`), so make is called
+      # directly here rather than wrapped in another nix develop.
+      - name: make verify
+        run: make verify
+
+  image:
+    name: Image builds for linux/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # The image jobs are the exception to the nix rule: the build happens
+      # inside the Dockerfile's own Go stage, so the host toolchain is not
+      # involved and buildx can cache layers through the Actions cache.
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Build the agent image without pushing
+        uses: docker/build-push-action@v7.3.0
+        with:
+          push: false
+          platforms: linux/amd64
+          build-args: VERSION=ci-${{ github.sha }}
+          tags: kuport-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  chart:
+    name: Chart lints and renders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: cachix/install-nix-action@v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: helm lint
+        run: nix develop -c helm lint chart/
+
+      - name: helm template
+        run: nix develop -c helm template kuport chart/
+
+      # Client-side dry-run parse and validate of the rendered manifests, no
+      # cluster and no credentials needed. kubectl apply --dry-run=client
+      # still decodes every object against the OpenAPI schema it has for the
+      # group, so a render that would be rejected by the API server fails
+      # here.
+      - name: Dry-run apply of the render
+        run: >-
+          nix develop -c bash -c
+          'set -euo pipefail;
+          helm template kuport chart/ | kubectl apply --dry-run=client -f -'
