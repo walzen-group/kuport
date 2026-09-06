@@ -1,0 +1,14 @@
+table ip kuport {
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 10; policy accept;
+		iifname "enp1s0" udp dport 27015-27115 counter dnat to 10.244.18.107:27015-27115
+		iifname "wt0" udp dport 27015-27115 counter dnat to 10.244.18.107:27015-27115
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname "cilium_host" ip daddr 10.244.18.107 udp dport 27015-27115 counter snat to ip saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+	}
+}
