@@ -20,12 +20,12 @@ kubectl get portmap -n <namespace> <name> -o wide
 ```
 
 Expected result: rows with CLASS, PROTO, PORT, ENDPOINT and, with `-o wide`,
-PUBLISHED. `published` lists the addresses the port answers on right now, one
-row per accepting node and interface. That is the thing to hand to whoever
-calls in from outside. One caveat while a planned `addresses` field on the
-class node rows is still missing: an agent fills the address column only for
-rows naming its own node, so with several accepting nodes some rows carry a
-blank address. The node and interface names are always complete.
+PUBLISHED. `published` lists the addresses the port answers on right now, one row per
+accepting node and interface. That is the thing to hand to whoever calls in
+from outside. Each row's address comes from the accepting node's own report
+into the class status, so with several accepting nodes a row can carry a blank
+address until that node's agent has reported its row. The node and interface
+names are always complete.
 
 What the shapes tell you:
 
@@ -48,9 +48,10 @@ The class has its own report:
 kubectl get portmapclass <name> -o yaml
 ```
 
-Read `status.nodes` (one row per accepting node: ready, message, the two MTU
-numbers) and `status.links` (one entry per node pair that holds a return-link
-address slot, with its key, subnet and slot).
+Read `status.nodes` (one row per accepting node: ready, message, the MTU
+numbers and the interface addresses it resolved) and `status.links` (one entry
+per node pair that holds a return-link address slot, with its key, subnet and
+slot).
 
 Logs come from the DaemonSet:
 

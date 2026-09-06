@@ -54,7 +54,7 @@ func (r *Reconciler) writePortMap(ctx context.Context, key types.NamespacedName,
 
 		next := pm.DeepCopy()
 		next.Status.Endpoint = desired.Endpoint
-		next.Status.Published = r.fillPublished(desired.Published)
+		next.Status.Published = r.fillPublished(ctx, pm.Spec.ClassName, desired.Published)
 		next.Status.ObservedGeneration = desired.ObservedGeneration
 		for _, c := range desired.Conditions {
 			meta.SetStatusCondition(&next.Status.Conditions, c)
@@ -67,28 +67,74 @@ func (r *Reconciler) writePortMap(ctx context.Context, key types.NamespacedName,
 	})
 }
 
-// fillPublished resolves the address of each published row this node can read.
-// Compute leaves every Address empty; the address of an interface is knowable
-// only on the node bearing it, so this node fills the rows naming itself and
-// leaves the rest for their own node's agent.
-//
-// Full cross-node resolution needs each accepting agent to publish its interface
-// addresses into the class's node rows, which needs an API field this task does
-// not own and reports instead. Until that field lands, a row for a remote
-// accepting node keeps the empty address Compute produced.
-func (r *Reconciler) fillPublished(rows []v1alpha1.PublishedAddress) []v1alpha1.PublishedAddress {
+// fillPublished resolves the address of each published row. A row naming this
+// node is read off the host, where the interface lives. A row naming another
+// accepting node is resolved from that node's own report: every accepting
+// agent publishes the addresses of the class's interfaces on its node into its
+// class status row, and the writer reads them from there. A row whose node has
+// not reported yet keeps the empty address Compute produced and fills in on a
+// later pass.
+func (r *Reconciler) fillPublished(ctx context.Context, className string, rows []v1alpha1.PublishedAddress) []v1alpha1.PublishedAddress {
 	if len(rows) == 0 {
 		return rows
 	}
 	out := make([]v1alpha1.PublishedAddress, len(rows))
 	copy(out, rows)
+
+	needClass := false
+	for _, row := range out {
+		if row.Address == "" && row.Node != r.NodeName {
+			needClass = true
+			break
+		}
+	}
+	var class v1alpha1.PortMapClass
+	if needClass {
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: className}, &class); err != nil {
+			// The class is gone or unreadable: leave remote rows blank this
+			// pass rather than fail the write over them.
+			class = v1alpha1.PortMapClass{}
+		}
+	}
+
 	for i := range out {
-		if out[i].Address != "" || out[i].Node != r.NodeName {
+		if out[i].Address != "" {
 			continue
 		}
-		if addr, err := r.Host.InterfaceAddr(out[i].Interface); err == nil {
-			out[i].Address = addr
+		if out[i].Node == r.NodeName {
+			if addr, err := r.Host.InterfaceAddr(out[i].Interface); err == nil {
+				out[i].Address = addr
+			}
+			continue
 		}
+		for _, nr := range class.Status.Nodes {
+			if nr.Name != out[i].Node {
+				continue
+			}
+			if addr, ok := nr.Addresses[out[i].Interface]; ok {
+				out[i].Address = addr
+			}
+			break
+		}
+	}
+	return out
+}
+
+// interfaceAddrs resolves each of the class's interfaces to its address on
+// this node. An interface with no resolvable address is left out, so the
+// published row for it stays blank rather than claiming a wrong one.
+func (r *Reconciler) interfaceAddrs(interfaces []string) map[string]string {
+	if len(interfaces) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(interfaces))
+	for _, name := range interfaces {
+		if addr, err := r.Host.InterfaceAddr(name); err == nil {
+			out[name] = addr
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -117,6 +163,7 @@ func (r *Reconciler) writeClass(ctx context.Context, name string, contrib krecon
 			row := contrib.Node
 			row.UnderlayMTU = int32(hs.underlayMTU)
 			row.LinkMTU = int32(hs.linkMTU)
+			row.Addresses = r.interfaceAddrs(class.Spec.Interfaces)
 			upsertNodeRow(&next.Status.Nodes, row)
 		}
 

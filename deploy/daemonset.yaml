@@ -65,3 +65,15 @@ spec:
             memory: 32Mi
           limits:
             memory: 128Mi
+        # The agent serves /healthz and /readyz on --health-addr (:8081 by
+        # default). Ready means the caches synced and the first reconcile
+        # completed; until then a node holds no rules, so readiness is what
+        # keeps a just-started pod from receiving the traffic it cannot serve.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081

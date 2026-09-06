@@ -29,14 +29,24 @@ func vxlanClass(name string, port int32) *v1alpha1.PortMapClass {
 	return c
 }
 
-// TestWritePortMapStatus writes an owned PortMap's status and confirms the local
-// published address is filled from the host while the endpoint and conditions
-// come straight from Compute.
+// TestWritePortMapStatus writes an owned PortMap's status and confirms the
+// published addresses are filled — a row naming this node from the host, a row
+// naming another accepting node from that node's reported class row — while the
+// endpoint and conditions come straight from Compute.
 func TestWritePortMapStatus(t *testing.T) {
 	scheme := testScheme(t)
-	pm := &v1alpha1.PortMap{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "web", Generation: 3}}
+	cls := &v1alpha1.PortMapClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "public"},
+		Status: v1alpha1.PortMapClassStatus{Nodes: []v1alpha1.NodeStatus{
+			{Name: "b", Ready: true, Addresses: map[string]string{"eth0": "203.0.113.9"}},
+		}},
+	}
+	pm := &v1alpha1.PortMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "web", Generation: 3},
+		Spec:       v1alpha1.PortMapSpec{ClassName: "public"},
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(pm).WithStatusSubresource(pm).Build()
+		WithObjects(pm, cls).WithStatusSubresource(pm, cls).Build()
 
 	r := &Reconciler{
 		Client:   c,
@@ -49,8 +59,8 @@ func TestWritePortMapStatus(t *testing.T) {
 		Endpoint:           &v1alpha1.Endpoint{Node: "a", Address: "10.1.0.5"},
 		ObservedGeneration: 3,
 		Published: []v1alpha1.PublishedAddress{
-			{Node: "a", Interface: "eth0"}, // this node: address filled
-			{Node: "b", Interface: "eth0"}, // remote node: left empty
+			{Node: "a", Interface: "eth0"}, // this node: address from the host
+			{Node: "b", Interface: "eth0"}, // remote node: address from its class row
 		},
 		Conditions: []metav1.Condition{{
 			Type: v1alpha1.ConditionAccepted, Status: metav1.ConditionTrue,
@@ -76,11 +86,97 @@ func TestWritePortMapStatus(t *testing.T) {
 	if a := published(got.Status.Published, "a", "eth0"); a != "192.0.2.10" {
 		t.Errorf("local published address = %q, want 192.0.2.10", a)
 	}
-	if b := published(got.Status.Published, "b", "eth0"); b != "" {
-		t.Errorf("remote published address = %q, want empty (needs the reported nodes[].addresses field)", b)
+	if b := published(got.Status.Published, "b", "eth0"); b != "203.0.113.9" {
+		t.Errorf("remote published address = %q, want 203.0.113.9 from node b's class row", b)
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAccepted) == nil {
 		t.Error("Accepted condition not written")
+	}
+}
+
+// TestWritePortMapStatusPeerNotReported writes a PortMap whose class exists but
+// whose peer accepting node has not reported a row yet: the remote published
+// row keeps its blank address instead of failing the write, and fills on the
+// pass after the peer reports.
+func TestWritePortMapStatusPeerNotReported(t *testing.T) {
+	scheme := testScheme(t)
+	cls := &v1alpha1.PortMapClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}
+	pm := &v1alpha1.PortMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "web"},
+		Spec:       v1alpha1.PortMapSpec{ClassName: "public"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(pm, cls).WithStatusSubresource(pm, cls).Build()
+
+	r := &Reconciler{Client: c, NodeName: "a", Host: &fakeHost{}}
+	desired := v1alpha1.PortMapStatus{
+		Endpoint: &v1alpha1.Endpoint{Node: "a", Address: "10.1.0.5"},
+		Published: []v1alpha1.PublishedAddress{
+			{Node: "a", Interface: "eth0"}, // unresolvable on this host: stays blank
+			{Node: "b", Interface: "eth0"}, // peer has not reported: stays blank
+		},
+	}
+
+	key := types.NamespacedName{Namespace: "team", Name: "web"}
+	if err := r.writePortMap(context.Background(), key, desired); err != nil {
+		t.Fatalf("writePortMap: %v", err)
+	}
+	var got v1alpha1.PortMap
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Status.Published) != 2 {
+		t.Fatalf("published rows = %d, want 2", len(got.Status.Published))
+	}
+	if a := published(got.Status.Published, "a", "eth0"); a != "" {
+		t.Errorf("unresolvable local published address = %q, want empty", a)
+	}
+	if b := published(got.Status.Published, "b", "eth0"); b != "" {
+		t.Errorf("unreported peer published address = %q, want empty", b)
+	}
+}
+
+// TestWriteClassStatusPublishesAddresses confirms the class row this node
+// writes carries the resolved addresses of the class's interfaces, which is
+// the report the PortMap status writer reads for rows naming this node.
+func TestWriteClassStatusPublishesAddresses(t *testing.T) {
+	scheme := testScheme(t)
+	cls := &v1alpha1.PortMapClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "public"},
+		Spec: v1alpha1.PortMapClassSpec{
+			ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
+			Interfaces: []string{"enp1s0", "wt0", "missing0"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cls).WithStatusSubresource(cls).Build()
+
+	r := &Reconciler{
+		Client:   c,
+		NodeName: "edge-a",
+		Now:      fixedNow,
+		Host: &fakeHost{ifaceAddr: map[string]string{
+			"enp1s0": "203.0.113.9", "wt0": "100.64.93.143",
+		}},
+	}
+	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{Name: "edge-a", Ready: true}}
+
+	if err := r.writeClass(context.Background(), "public", contrib, hostState{underlayMTU: 1400, linkMTU: 1350}); err != nil {
+		t.Fatalf("writeClass: %v", err)
+	}
+	var got v1alpha1.PortMapClass
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "public"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	row := findNode(got.Status.Nodes, "edge-a")
+	if row == nil {
+		t.Fatal("own node row missing")
+	}
+	if row.Addresses["enp1s0"] != "203.0.113.9" || row.Addresses["wt0"] != "100.64.93.143" {
+		t.Errorf("row addresses = %v, want enp1s0 203.0.113.9 and wt0 100.64.93.143", row.Addresses)
+	}
+	if _, ok := row.Addresses["missing0"]; ok {
+		t.Errorf("row addresses carry an interface with no resolvable address: %v", row.Addresses)
 	}
 }
 

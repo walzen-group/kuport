@@ -338,6 +338,15 @@ spec:
                     NodeStatus is one accepting node's readiness for this class, maintained by
                     that node's agent.
                   properties:
+                    addresses:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Addresses of this node's interfaces, keyed by interface name. Each
+                        accepting agent fills it for the class's interfaces it can resolve, so
+                        the agent that writes a PortMap's status can fill the published rows
+                        naming this node. An interface with no resolvable address is absent.
+                      type: object
                     linkMTU:
                       description: |-
                         UnderlayMTU minus the 50-byte VXLAN overhead. A reply larger than this

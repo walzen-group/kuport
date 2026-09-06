@@ -32,6 +32,13 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
+  # The tunnel-mode host check reads one ConfigMap, kube-system/cilium-config.
+  # A ClusterRole cannot scope by namespace, so resourceNames scopes the get to
+  # that one name.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["cilium-config"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

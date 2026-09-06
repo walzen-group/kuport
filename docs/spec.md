@@ -183,11 +183,12 @@ status:
 now, one row per accepting node and interface. It is what `kubectl get portmap`
 prints in its wide columns.
 
-An agent can only resolve the address column for rows naming its own node: it
-reads those off the host. Rows for the other accepting nodes carry the node
-and interface names with an empty address until a planned `addresses` field on
-the class's per-node status lands, so a single-address PortMap may show fewer
-filled addresses than it has rows.
+Each row's address comes from the node that bears it. Every accepting agent
+publishes the addresses of the class's interfaces on its node into its
+PortMapClass status row, and the agent that writes the PortMap's status
+resolves the rows from there: this node's rows straight off the host, the
+other nodes' rows from that report. A row whose node has not reported yet
+carries an empty address and fills in on the next pass.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
@@ -218,6 +219,9 @@ status:
       ready: true
       underlayMTU: 1400
       linkMTU: 1350
+      addresses:
+        enp1s0: 203.0.113.9
+        wt0: 100.64.93.143
     - name: worker-c
       ready: false
       message: interface wt0 not present
@@ -235,7 +239,8 @@ routing table (`200 + slot`) and the packet mark (`0x6b700000 | slot`), so a
 claim is never renumbered while a link uses it.
 
 One `nodes` row per selected node, written by that node's agent, carrying the
-MTU numbers it read from the host. The Ready condition is per class:
+MTU numbers and interface addresses it read from the host. The Ready condition
+is per class:
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |

@@ -158,6 +158,13 @@ type NodeStatus struct {
 	// cannot cross a return link.
 	// +optional
 	LinkMTU int32 `json:"linkMTU,omitempty"`
+
+	// Addresses of this node's interfaces, keyed by interface name. Each
+	// accepting agent fills it for the class's interfaces it can resolve, so
+	// the agent that writes a PortMap's status can fill the published rows
+	// naming this node. An interface with no resolvable address is absent.
+	// +optional
+	Addresses map[string]string `json:"addresses,omitempty"`
 }
 
 // +kubebuilder:object:root=true

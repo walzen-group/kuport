@@ -298,10 +298,11 @@ none of the others can.
    -i any port <port>` at the pod's node: the packets you capture carry your
    source address.
 
-A wrinkle in step 4 to expect, not a fault: an agent fills the address column
-only for `published` rows naming its own node. Until a planned `addresses`
-field on the class's node rows lands, rows for the other accepting nodes
-carry node and interface names and a blank address.
+A wrinkle in step 4 to expect, not a fault: each row's address comes from the
+accepting node's own report into the class status, so a row can carry its node
+and interface names with a blank address until that node's agent has reported
+its row. The names are complete from the start; only the address can lag a
+pass.
 
 Step 5 is the only one that proves the datapath. Steps 1-4 describe what the
 agents wrote and reported; they can all be green while the port stays shut,
