@@ -75,7 +75,7 @@ mysteriously.
 
 ## API
 
-Group `kuport.dev`, version `v1alpha1`. Two kinds.
+Group `kuport.wlz.li`, version `v1alpha1`. Two kinds.
 
 ### PortMapClass
 
@@ -83,14 +83,14 @@ Cluster-scoped. The admin writes it. It says which nodes accept traffic, on
 which interfaces, which ports may be asked for, and which namespaces may ask.
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: public
 spec:
   nodeSelector:
     matchLabels:
-      kuport.dev/edge: "true"
+      kuport.wlz.li/edge: "true"
   interfaces:
     - enp1s0
   ports:
@@ -99,7 +99,7 @@ spec:
     reserved: [80, 443]
   namespaceSelector:
     matchLabels:
-      kuport.dev/public: allowed
+      kuport.wlz.li/public: allowed
   returnPath:
     mode: Vxlan
     vxlan:
@@ -125,7 +125,7 @@ spec:
 Namespaced. The workload writes it, beside its Service.
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMap
 metadata:
   name: gameserver

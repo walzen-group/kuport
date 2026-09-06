@@ -2,7 +2,7 @@
 ---
 # Rendered verbatim from values.yaml: a PortMapClass named by the map key,
 # with the entry's contents as its spec.
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: {{ $name }}

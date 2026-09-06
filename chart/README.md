@@ -40,7 +40,7 @@ than patching YAML by hand. Where this chart and `deploy/` disagree,
 
    ```
    helm upgrade kuport ./chart -n kuport-system --set-json \
-     'classes={"public":{"nodeSelector":{"matchLabels":{"kuport.dev/edge":"true"}},"interfaces":["enp1s0"],"ports":{"min":1024,"max":65535,"reserved":[80,443]},"namespaceSelector":{"matchLabels":{"kuport.dev/public":"allowed"}},"returnPath":{"mode":"Vxlan"}}}'
+     'classes={"public":{"nodeSelector":{"matchLabels":{"kuport.wlz.li/edge":"true"}},"interfaces":["enp1s0"],"ports":{"min":1024,"max":65535,"reserved":[80,443]},"namespaceSelector":{"matchLabels":{"kuport.wlz.li/public":"allowed"}},"returnPath":{"mode":"Vxlan"}}}'
    ```
 
    Expected result: `STATUS: deployed` and

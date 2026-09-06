@@ -8,16 +8,16 @@ metadata:
     app.kubernetes.io/name: kuport
     app.kubernetes.io/instance: kuport
 rules:
-  - apiGroups: ["kuport.dev"]
+  - apiGroups: ["kuport.wlz.li"]
     resources: ["portmapclasses"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["kuport.dev"]
+  - apiGroups: ["kuport.wlz.li"]
     resources: ["portmapclasses/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["kuport.dev"]
+  - apiGroups: ["kuport.wlz.li"]
     resources: ["portmaps"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["kuport.dev"]
+  - apiGroups: ["kuport.wlz.li"]
     resources: ["portmaps/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["discovery.k8s.io"]

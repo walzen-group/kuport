@@ -11,7 +11,7 @@ network, `externalTrafficPolicy: Local` needs the pod on the entry node, and a
 proxy re-originates the connection.
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMap
 metadata:
   name: gameserver

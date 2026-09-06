@@ -1,6 +1,6 @@
-// Package v1alpha1 contains the kuport.dev API types: PortMapClass and PortMap.
+// Package v1alpha1 contains the kuport.wlz.li API types: PortMapClass and PortMap.
 // +kubebuilder:object:generate=true
-// +groupName=kuport.dev
+// +groupName=kuport.wlz.li
 package v1alpha1
 
 import (
@@ -10,7 +10,7 @@ import (
 )
 
 // GroupVersion is the group and version this package's types belong to.
-var GroupVersion = schema.GroupVersion{Group: "kuport.dev", Version: "v1alpha1"}
+var GroupVersion = schema.GroupVersion{Group: "kuport.wlz.li", Version: "v1alpha1"}
 
 // SchemeBuilder registers this package's types with a runtime.Scheme. It depends
 // only on apimachinery so the API package stays cheap to import.

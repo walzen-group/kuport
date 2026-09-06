@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.22.0
-  name: portmaps.kuport.dev
+  name: portmaps.kuport.wlz.li
 spec:
-  group: kuport.dev
+  group: kuport.wlz.li
   names:
     kind: PortMap
     listKind: PortMapList

@@ -1,6 +1,6 @@
 # PortMap "gameserver": UDP 3000 on every public-class node, to the "game"
 # port of Service gameserver in namespace games.
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMap
 metadata:
   name: gameserver
@@ -15,7 +15,7 @@ spec:
 ---
 # PortMap "gameserver-voice": endPort opens the inclusive range 3100-3109,
 # one mapping for the whole voice block.
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMap
 metadata:
   name: gameserver-voice

@@ -216,7 +216,7 @@ func TestWriteClassStatusConflictRetryRecomputes(t *testing.T) {
 					return err
 				}
 				return kerrors.NewConflict(
-					schema.GroupResource{Group: "kuport.dev", Resource: "portmapclasses"},
+					schema.GroupResource{Group: "kuport.wlz.li", Resource: "portmapclasses"},
 					obj.GetName(), fmt.Errorf("forced conflict"))
 			}
 			return cl.SubResource(sub).Update(ctx, obj, opts...)

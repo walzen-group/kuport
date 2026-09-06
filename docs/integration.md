@@ -162,14 +162,14 @@ behind home connections, joined by a WireGuard mesh named `wt0`. Its two
 classes:
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: public
 spec:
   nodeSelector:
     matchLabels:
-      kuport.dev/edge: "true"
+      kuport.wlz.li/edge: "true"
   interfaces:
     - enp1s0
     - wt0
@@ -179,7 +179,7 @@ spec:
     reserved: [80, 443]
   namespaceSelector:
     matchLabels:
-      kuport.dev/public: allowed
+      kuport.wlz.li/public: allowed
   returnPath:
     mode: Vxlan
     vxlan:
@@ -196,7 +196,7 @@ PortMap serve both players on the internet and players on the VPN. The
 Vxlan return path is required because the pod will not live on the edge node.
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: intranet
@@ -236,8 +236,8 @@ Which fields are decisions and which are defaults:
 Labels the selectors match do not exist until you create them:
 
 ```sh
-kubectl label node <edge-node> kuport.dev/edge=true
-kubectl label namespace <some-ns> kuport.dev/public=allowed
+kubectl label node <edge-node> kuport.wlz.li/edge=true
+kubectl label namespace <some-ns> kuport.wlz.li/public=allowed
 ```
 
 ### Step: confirm the class is Ready
@@ -257,7 +257,7 @@ Three pieces, all in the workload's namespace. The namespace label (above). A
 Service exposing a named port. And the PortMap beside it:
 
 ```yaml
-apiVersion: kuport.dev/v1alpha1
+apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMap
 metadata:
   name: gameserver
