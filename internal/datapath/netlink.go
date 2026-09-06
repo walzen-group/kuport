@@ -1,6 +1,7 @@
 package datapath
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -134,7 +135,8 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 		if err != nil {
 			v := vxlanFor(l)
 			if err := nl.LinkAdd(v); err != nil {
-				return err
+				return fmt.Errorf("create link %s (vni %d, port %d, %s to %s): %w",
+					l.Name, l.VNI, l.Port, l.LocalAddr, l.RemoteAddr, err)
 			}
 			existing = v
 		} else {
@@ -168,11 +170,12 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 				// below and applyRoutes — last in Apply — restates
 				// every route the old index dropped.
 				if err := nl.LinkDel(existing); err != nil {
-					return err
+					return fmt.Errorf("rebuild link %s, delete: %w", l.Name, err)
 				}
 				v := vxlanFor(l)
 				if err := nl.LinkAdd(v); err != nil {
-					return err
+					return fmt.Errorf("rebuild link %s (vni %d, port %d, %s to %s): %w",
+						l.Name, l.VNI, l.Port, l.LocalAddr, l.RemoteAddr, err)
 				}
 				existing = v
 			}
@@ -188,12 +191,12 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 		}
 		if !addrPresent(have, addr) {
 			if err := nl.AddrAdd(existing, addr); err != nil {
-				return err
+				return fmt.Errorf("address %s on link %s: %w", l.LinkAddr, l.Name, err)
 			}
 		}
 		if existing.Attrs().Flags&net.FlagUp == 0 {
 			if err := nl.LinkSetUp(existing); err != nil {
-				return err
+				return fmt.Errorf("bring link %s up: %w", l.Name, err)
 			}
 		}
 	}
@@ -228,7 +231,8 @@ func applyRules(nl NetlinkConn, rules []IPRule) error {
 	for _, d := range desired {
 		if !ruleListed(existing, d) {
 			if err := nl.RuleAdd(d); err != nil {
-				return err
+				return fmt.Errorf("add rule pref %d mark %#x table %d: %w",
+					d.Priority, d.Mark, d.Table, err)
 			}
 		}
 	}
@@ -267,7 +271,8 @@ func applyRoutes(nl NetlinkConn, routes []Route) error {
 		for _, d := range desired {
 			if !routeListed(existing, d) {
 				if err := nl.RouteAdd(d); err != nil {
-					return err
+					return fmt.Errorf("add route in table %d via %s dev index %d: %w",
+						table, d.Gw, d.LinkIndex, err)
 				}
 			}
 		}

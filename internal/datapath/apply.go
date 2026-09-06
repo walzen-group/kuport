@@ -7,6 +7,7 @@ package datapath
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"github.com/google/nftables"
@@ -88,15 +89,18 @@ func Apply(ctx context.Context, plan Plan, h Handles) error {
 		return err
 	}
 	if err := applyLinks(h.NL, plan.Links); err != nil {
-		return err
+		return fmt.Errorf("links: %w", err)
 	}
 	if err := applyNFT(h.NFT, plan); err != nil {
-		return err
+		return fmt.Errorf("nftables: %w", err)
 	}
 	if err := applyRules(h.NL, plan.IPRules); err != nil {
-		return err
+		return fmt.Errorf("ip rules: %w", err)
 	}
-	return applyRoutes(h.NL, plan.Routes)
+	if err := applyRoutes(h.NL, plan.Routes); err != nil {
+		return fmt.Errorf("routes: %w", err)
+	}
+	return nil
 }
 
 // Teardown removes everything kuport owns on this node: the nftables table, the
