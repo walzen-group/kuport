@@ -108,13 +108,29 @@ jobs:
       - name: helm template
         run: nix develop -c helm template kuport chart/
 
-      # Client-side dry-run parse and validate of the rendered manifests, no
-      # cluster and no credentials needed. kubectl apply --dry-run=client
-      # still decodes every object against the OpenAPI schema it has for the
-      # group, so a render that would be rejected by the API server fails
-      # here.
-      - name: Dry-run apply of the render
-        run: >-
-          nix develop -c bash -c
-          'set -euo pipefail;
-          helm template kuport chart/ | kubectl apply --dry-run=client -f -'
+      # Schema validation of the render with no cluster available.
+      # `kubectl apply --dry-run=client` cannot run here at all: kubectl
+      # v1.37 performs API discovery even for a client dry-run, so it needs a
+      # reachable API server regardless of --validate (the failure CI run
+      # 34031346074 hit, reproduced offline on this host for apply and
+      # create). kubectl-validate embeds the API server's own structural
+      # schemas in its binary: it catches unknown fields, wrong types,
+      # unknown groups, and unparsable YAML with no server and no network.
+      # The tool is resolved from the nixpkgs revision already pinned in
+      # flake.lock, so its version and embedded schemas move with flake.lock
+      # and this adds no separate pin to maintain.
+      #
+      # Input is a file, not a pipe: kubectl-validate 0.0.4 validates only
+      # the first document of a /dev/stdin stream and silently passes every
+      # later document, so a piped render would verify nothing past the
+      # ServiceAccount (measured on this host).
+      - name: Validate the render against the API schemas, offline
+        run: |
+          # shellcheck disable=SC2016  # the inner bash expands these
+          nix develop -c bash -c '
+            set -euo pipefail
+            rev=$(nix eval --impure --raw --expr "(builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked.rev")
+            mkdir -p .tmp
+            helm template kuport chart/ > .tmp/ci-validate-render.yaml
+            nix shell "github:NixOS/nixpkgs/${rev}#kubectl-validate" -c kubectl-validate .tmp/ci-validate-render.yaml
+          '
