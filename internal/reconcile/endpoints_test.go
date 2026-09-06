@@ -88,15 +88,16 @@ func TestEndpointChoice(t *testing.T) {
 		}
 	}
 
-	t.Run("local pod wins over remote", func(t *testing.T) {
-		// node-a is accepting and hosts pod-z; a lower-named pod-a is on node-b.
-		// Local placement wins over the name tiebreak.
+	t.Run("pod on the accepting node wins", func(t *testing.T) {
+		// node-a is the only accepting node and hosts pod-z; the lower-named
+		// pod-a sits on non-accepting node-b. The accepting-node rank wins
+		// over the name tiebreak — deterministically, on every agent.
 		in := build("node-a",
 			endpointSpec{addr: "10.244.1.1", node: "node-b", target: "pod-a"},
 			endpointSpec{addr: "10.244.0.9", node: "node-a", target: "pod-z"},
 		)
 		if got := dnatAddrs(Compute(in)); len(got) != 1 || got[0] != "10.244.0.9" {
-			t.Fatalf("DNAT = %v, want [10.244.0.9] (local pod)", got)
+			t.Fatalf("DNAT = %v, want [10.244.0.9] (pod on the accepting node)", got)
 		}
 	})
 

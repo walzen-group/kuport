@@ -101,7 +101,7 @@ func (r *Reconciler) now() metav1.Time {
 	return metav1.Now()
 }
 
-// SetupWithManager wires the six watches to the single whole-node request key.
+// SetupWithManager wires the five watches to the single whole-node request key.
 // Node stays cluster-wide: host checks read only this node from the cache, but
 // class selection needs every node's labels and InternalIP, so the informer is
 // not filtered.
@@ -116,7 +116,6 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.PortMapClass{}, toNode).
 		Watches(&v1alpha1.PortMap{}, toNode).
 		Watches(&discoveryv1.EndpointSlice{}, toNode).
-		Watches(&corev1.Service{}, toNode).
 		Watches(&corev1.Node{}, toNode).
 		Watches(&corev1.Namespace{}, toNode).
 		Complete(r)

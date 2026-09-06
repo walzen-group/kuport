@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"fmt"
 	"sort"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -15,29 +16,43 @@ const serviceNameLabel = "kubernetes.io/service-name"
 
 // chooseEndpoint resolves a mapping's serviceRef to a single endpoint. It
 // gathers the ready IPv4 candidates behind the named Service port, then applies
-// the choice the spec fixes: a candidate on this node wins, otherwise the first
-// by targetRef.name ascending. That second rule, not slice order, is what makes
-// every agent pick the same endpoint. It returns nil when there is no candidate.
-func chooseEndpoint(in Inputs, idx *index, m *mapping) *chosenEndpoint {
+// the choice every agent computes to the same answer from shared inputs: a
+// candidate on an accepting node wins, ranked by accepting-node name
+// ascending, then by targetRef.name ascending within that node; with no
+// candidate on an accepting node, the first by targetRef.name overall. There is
+// no node-local preference: two agents picking different endpoints program
+// different pods. It returns nil when there is no candidate.
+func chooseEndpoint(in Inputs, m *mapping) *chosenEndpoint {
 	pm := m.pm
 	candidates := gatherCandidates(in, pm)
 	if len(candidates) == 0 {
 		return nil
 	}
 
-	// Sort by targetRef.name, bytewise, so the fallback and the local-preference
-	// tie-break are both stable across agents and watch orderings.
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].targetR < candidates[j].targetR
-	})
-
-	// A candidate on this node wins; the lowest targetRef.name among local
-	// candidates, since the slice is already sorted.
-	for i := range candidates {
-		if candidates[i].node == in.NodeName {
-			return &candidates[i]
+	// acceptingRank orders nodes by name for the primary key; a node the
+	// class does not select ranks after every accepting node, so the sort's
+	// tail is the targetRef.name fallback.
+	acceptingRank := func(node string) int {
+		for i, n := range m.acceptingNodes {
+			if n == node {
+				return i
+			}
 		}
+		return len(m.acceptingNodes)
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		ri, rj := acceptingRank(candidates[i].node), acceptingRank(candidates[j].node)
+		if ri != rj {
+			return ri < rj
+		}
+		if candidates[i].targetR != candidates[j].targetR {
+			return candidates[i].targetR < candidates[j].targetR
+		}
+		if candidates[i].node != candidates[j].node {
+			return candidates[i].node < candidates[j].node
+		}
+		return candidates[i].addr < candidates[j].addr
+	})
 	return &candidates[0]
 }
 
@@ -107,56 +122,63 @@ func strFromPtr(p *string) string {
 	return *p
 }
 
-// decideRole fixes the role this node plays for a mapping and its Programmed
-// condition, applying the two refusals in precedence order: a None return path
-// with a remote pod is unavailable, and several accepting nodes with a remote
-// pod is the documented single-node limitation. Both leave the mapping with no
-// rules on the nodes they refuse.
-func decideRole(in Inputs, idx *index, m *mapping) {
+// decideRole fixes the serving node for a mapping and this node's Programmed
+// condition. The serving node S is a shared computation: the node holding the
+// chosen endpoint when that node accepts the class, otherwise the first
+// accepting node by name. Exactly S programs the mapping; the adjudicated
+// semantics have every other accepting node report the
+// RemotePodMultipleAcceptingNodes refusal, computed identically here, and
+// only S owns the status (see statusOwner). Programmed=True is deferred to
+// resolveProgrammed for the single-accepting-node case, where it waits on
+// the class node rows and, for a remote pod, the landed return-path slot.
+func decideRole(in Inputs, m *mapping) {
+	// The serving node derives from the shared choice, never from a
+	// node-local preference. It stays "" only when no node accepts, where
+	// the status-owner fallback chain takes over.
+	if len(m.acceptingNodes) > 0 {
+		m.serving = m.acceptingNodes[0]
+		if m.endpoint != nil && contains(m.acceptingNodes, m.endpoint.node) {
+			m.serving = m.endpoint.node
+		}
+	}
+
 	if m.endpoint == nil {
 		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNoReadyEndpoint,
 			"no ready endpoint for the named service port", in.Now)
 		return
 	}
 
-	endpointNode := m.endpoint.node
-	accepting := m.acceptingNodes
-
-	if len(accepting) == 0 {
+	if len(m.acceptingNodes) == 0 {
 		// The class selects no node, so nothing can accept the port.
 		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNodeNotReady,
 			"class selects no accepting node", in.Now)
 		return
 	}
 
-	// Co-located on a single accepting node: DNAT only, no return link.
-	if len(accepting) == 1 && accepting[0] == endpointNode {
-		m.effAccepting = accepting[0]
-		m.remote = false
-		m.setProgrammed(metav1.ConditionTrue, v1alpha1.ReasonAllNodesReady, "", in.Now)
-		return
-	}
+	m.remote = m.serving != m.endpoint.node
 
-	mode := returnPathMode(m.class)
-	if mode == v1alpha1.ReturnPathNone {
+	if m.remote && returnPathMode(m.class) == v1alpha1.ReturnPathNone {
+		// Anchored on S: every agent computes the same S and the same
+		// refusal, and no node programs a mapping whose replies cannot
+		// return.
 		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
 			"return path is None and the chosen pod is on another node", in.Now)
 		return
 	}
 
-	if len(accepting) >= 2 {
-		first := accepting[0]
-		m.effAccepting = first
-		m.remote = first != endpointNode
+	// S is the sole programming node, local pod or remote.
+	m.effAccepting = m.serving
+
+	if len(m.acceptingNodes) >= 2 {
 		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonRemotePodMultipleAcceptingNodes,
-			"class selects several accepting nodes and the pod is remote; only "+first+" is programmed", in.Now)
+			fmt.Sprintf("class selects %d accepting nodes; only %s programs this mapping",
+				len(m.acceptingNodes), m.serving), in.Now)
 		return
 	}
 
-	// Single accepting node, pod elsewhere: forward across a return link.
-	m.effAccepting = accepting[0]
-	m.remote = true
-	m.setProgrammed(metav1.ConditionTrue, v1alpha1.ReasonAllNodesReady, "", in.Now)
+	// Single accepting node: True or False is decided against the class
+	// node rows and the return-path slot, both settled after allocation.
+	m.gated = true
 }
 
 // returnPathMode returns a class's return-path mode.

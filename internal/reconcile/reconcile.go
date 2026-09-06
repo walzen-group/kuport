@@ -28,9 +28,10 @@ import (
 	"github.com/walzen-group/kuport/internal/datapath"
 )
 
-// Inputs is everything Compute is allowed to see. It is the watched world as of
-// one reconcile pass, plus the name of the node this pass computes for and a
-// single injected timestamp. Nothing else reaches the computation.
+// Inputs is everything Compute is allowed to see. It is the watched world as
+// of one reconcile pass, plus the name of the node this pass computes for, a
+// single injected timestamp, and the agent's host read of the interfaces the
+// classes select. Nothing else reaches the computation.
 type Inputs struct {
 	NodeName   string
 	Nodes      []*corev1.Node
@@ -39,6 +40,12 @@ type Inputs struct {
 	PortMaps   []*v1alpha1.PortMap
 	Slices     []*discoveryv1.EndpointSlice
 	Now        metav1.Time
+
+	// InterfaceAddrs resolves interface names to this node's IPv4 addresses,
+	// read from the host by the agent through its Host seam. An interface
+	// absent from the map is missing or unaddressed here: Compute reports
+	// the class's node row not-ready naming it, never a skipped row.
+	InterfaceAddrs map[string]string
 }
 
 // Result is the desired state for this node plus the status this node is
@@ -88,13 +95,24 @@ type mapping struct {
 	// endpoint is the chosen endpoint, nil when there is no ready candidate.
 	endpoint *chosenEndpoint
 
-	// effAccepting is the accepting node that actually forwards this mapping, or
-	// "" when the mapping is refused and no node programs it. With several
-	// accepting nodes and a remote pod, this is the first accepting node by
-	// name; every other accepting node emits nothing.
+	// serving is the one accepting node that programs this mapping, derived
+	// from the shared endpoint choice: the endpoint's node when it accepts,
+	// else the first accepting node by name. Every agent computes the same
+	// value, and only it owns the mapping's status. It is "" when the class
+	// selects no node or the mapping was not accepted.
+	serving string
+
+	// effAccepting is the node that actually forwards this mapping: serving
+	// when the mapping is programmed anywhere, "" when no node may program
+	// it (no endpoint, no accepting node, or the None-return-path refusal).
+	// With several accepting nodes it equals serving: one node serves.
 	effAccepting string
 	// remote is true when effAccepting must reach the pod across a return link.
 	remote bool
+	// gated marks the accepted, single-accepting-node mapping whose final
+	// Programmed condition resolveProgrammed settles after the slot
+	// allocation is known.
+	gated bool
 
 	// programmedCond is the Programmed condition to report, set for accepted
 	// mappings only.
@@ -146,6 +164,10 @@ func Compute(in Inputs) Result {
 		alloc[c.Name] = allocateClass(c, needed[c.Name])
 	}
 
+	// The single-accepting-node mappings deferred their Programmed condition
+	// to the settled rows and slots; decideRole could not see either.
+	resolveProgrammed(in, idx, mappings, alloc)
+
 	// State: the rules, links, marks and routes this node should hold.
 	buildState(&res.State, in, idx, mappings, alloc)
 
@@ -154,7 +176,7 @@ func Compute(in Inputs) Result {
 	buildClassStatus(&res, in, idx, mappings, alloc, needed)
 
 	// PortMap status: emitted only by the node that owns each mapping.
-	buildPortMapStatus(&res, in, idx, mappings, alloc)
+	buildPortMapStatus(&res, in, mappings)
 
 	return res
 }
@@ -201,9 +223,11 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			Port:      sel,
 			PortIsSrc: false,
 		})
-		// A remote pod needs the return-link device on this end.
+		// A remote pod needs the return-link device on this end, and only
+		// once the claim has landed: a tentative slot must not half-build a
+		// link whose mark could collide.
 		if m.remote {
-			if slot, ok := alloc.slotFor(m, this); ok {
+			if slot, ok := alloc.landedSlot(m); ok {
 				if lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, endpointNode, slot); ok {
 					st.Links = append(st.Links, linkDevice(lp))
 				}
@@ -214,11 +238,6 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 	// Target side: this node holds the pod and the accepting node is elsewhere.
 	if this == endpointNode && m.effAccepting != this {
 		src := addr
-		st.Mark = append(st.Mark, datapath.MarkRule{
-			SrcAddr: addr,
-			Port:    sel,
-			Mark:    markBase | slotOrZero(alloc, m),
-		})
 		st.Exempt = append(st.Exempt, datapath.ExemptRule{
 			OifName:   "cilium_*",
 			Negate:    true,
@@ -226,8 +245,17 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			Port:      sel,
 			PortIsSrc: true,
 		})
-		if slot, ok := alloc.slotFor(m, this); ok {
+		// The mark carries the slot, so nothing that depends on the slot is
+		// written until the claim has landed: an unresolved slot must never
+		// become a real mark, and the divert rules and link that share the
+		// slot appear with it, atomically per pass.
+		if slot, ok := alloc.landedSlot(m); ok {
 			if lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, m.effAccepting, slot); ok {
+				st.Mark = append(st.Mark, datapath.MarkRule{
+					SrcAddr: src,
+					Port:    sel,
+					Mark:    lp.mark,
+				})
 				st.Links = append(st.Links, linkDevice(lp))
 				st.Rules = append(st.Rules, loopGuardRule(lp), divertRule(lp))
 				st.Routes = append(st.Routes, returnRoute(lp))
@@ -236,14 +264,54 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 	}
 }
 
-// slotOrZero returns the mark's slot bits for a mapping, or 0 when the slot is
-// not yet resolvable on this node. The mark rule is still emitted so the reply
-// is recognised once the link lands.
-func slotOrZero(alloc classAlloc, m *mapping) uint32 {
-	if slot, ok := alloc.slotFor(m, m.endpoint.node); ok {
-		return uint32(slot)
+// resolveProgrammed settles the Programmed condition for the mappings
+// decideRole gated: the single-accepting-node case. True requires every
+// accepting node of the class to report a ready node row and, when the pod
+// is remote, a landed return-path slot whose link both nodes' addresses can
+// build. Until then the status names what is missing; the level-driven
+// requeue heals it and the reported state is honest during the window.
+func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[string]classAlloc) {
+	for _, m := range mappings {
+		if !m.gated {
+			continue
+		}
+		if msg, ok := acceptingRowsReady(m); !ok {
+			m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNodeNotReady, msg, in.Now)
+			continue
+		}
+		if m.remote {
+			a := alloc[m.pm.Spec.ClassName]
+			slot, ok := a.landedSlot(m)
+			if !ok {
+				m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
+					fmt.Sprintf("return link for %s is not claimed yet",
+						pairKey(m.effAccepting, m.endpoint.node)), in.Now)
+				continue
+			}
+			if _, ok := buildLinkParams(idx, m.class, a.subnet, m.effAccepting, m.endpoint.node, slot); !ok {
+				m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
+					"a node on the return path has no usable address", in.Now)
+				continue
+			}
+		}
+		m.setProgrammed(metav1.ConditionTrue, v1alpha1.ReasonAllNodesReady, "", in.Now)
 	}
-	return 0
+}
+
+// acceptingRowsReady reports whether every accepting node of the mapping's
+// class has written a ready row to the class status. The message names the
+// first node that has not, and what its row reported.
+func acceptingRowsReady(m *mapping) (string, bool) {
+	for _, name := range m.acceptingNodes {
+		row := classNodeRow(m.class, name)
+		switch {
+		case row == nil:
+			return fmt.Sprintf("accepting node %s has not reported a class status row", name), false
+		case !row.Ready:
+			return fmt.Sprintf("accepting node %s is not ready: %s", name, row.Message), false
+		}
+	}
+	return "", true
 }
 
 // portSel builds the datapath PortSel for a mapping's protocol and interval.

@@ -48,5 +48,30 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	for i := range slices.Items {
 		in.Slices = append(in.Slices, &slices.Items[i])
 	}
+	in.InterfaceAddrs = r.resolveInterfaces(in.Classes)
 	return in, nil
+}
+
+// resolveInterfaces reads every interface any class selects off the host,
+// each one once, for the snapshot Compute turns into class node rows. An
+// interface the host cannot resolve is absent from the map; Compute reports
+// it as a not-ready row naming it, never as a skipped row.
+func (r *Reconciler) resolveInterfaces(classes []*v1alpha1.PortMapClass) map[string]string {
+	var out map[string]string
+	seen := map[string]bool{}
+	for _, c := range classes {
+		for _, iface := range c.Spec.Interfaces {
+			if seen[iface] {
+				continue
+			}
+			seen[iface] = true
+			if addr, err := r.Host.InterfaceAddr(iface); err == nil {
+				if out == nil {
+					out = map[string]string{}
+				}
+				out[iface] = addr
+			}
+		}
+	}
+	return out
 }

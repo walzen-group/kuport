@@ -35,8 +35,8 @@ func resolveMappings(in Inputs, idx *index) []*mapping {
 	// Endpoints and roles depend on the accepted set being settled.
 	for _, m := range out {
 		if m.accepted {
-			m.endpoint = chooseEndpoint(in, idx, m)
-			decideRole(in, idx, m)
+			m.endpoint = chooseEndpoint(in, m)
+			decideRole(in, m)
 		}
 	}
 

@@ -31,14 +31,16 @@ type neededPair struct {
 
 // classAlloc is the settled slot allocation for one class in this pass: the
 // existing claims read from status, the slots newly assigned to needed pairs
-// that had none, and whether the subnet ran out or failed to parse.
+// that had none, and whether the subnet ran out or failed to parse. A newly
+// assigned slot exists only to propose its claim; nothing that carries the
+// slot into the host is built until the claim lands in existing.
 type classAlloc struct {
 	subnet        netip.Prefix
 	invalidSubnet bool
 	exhausted     bool
 	existing      map[string]v1alpha1.LinkAllocation
 	needed        map[string]neededPair
-	newly         map[string]int // key -> slot
+	newly         map[string]int // key -> slot, to propose as a claim
 }
 
 // neededPairsByClass groups the return-link pairs every accepted mapping needs,
@@ -113,19 +115,15 @@ func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) c
 	return a
 }
 
-// slotFor returns the slot a mapping's return link uses on this node, and
-// whether this node may build the link now. An existing claim is usable by any
-// node; a freshly allocated slot is usable only by the endpoint holder, who is
-// the single writer that proposes the claim.
-func (a classAlloc) slotFor(m *mapping, thisNode string) (int, bool) {
+// landedSlot returns the slot of a mapping's return-link pair when the claim
+// has landed in the class status, and false while it is still propagating.
+// Marks, divert rules, links and routes all carry the slot; emitting any of
+// them against a tentative allocation lets a lost claim race mark packets
+// with a slot another pair already holds.
+func (a classAlloc) landedSlot(m *mapping) (int, bool) {
 	key := pairKey(m.effAccepting, m.endpoint.node)
-	if la, ok := a.existing[key]; ok {
-		return int(la.Slot), true
-	}
-	if slot, ok := a.newly[key]; ok && thisNode == m.endpoint.node {
-		return slot, true
-	}
-	return 0, false
+	la, ok := a.existing[key]
+	return int(la.Slot), ok
 }
 
 // linkParams holds every value derived from a slot for one end of a return link.

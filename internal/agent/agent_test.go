@@ -36,9 +36,10 @@ func TestReconcileEndToEnd(t *testing.T) {
 		Client:   c,
 		NodeName: "a",
 		DP:       dp,
-		Host:     &fakeHost{tunnelOK: true, tunnelKnown: true, underlay: 1350},
-		Now:      fixedNow,
-		Log:      logr.Discard(),
+		Host: &fakeHost{tunnelOK: true, tunnelKnown: true, underlay: 1350,
+			ifaceAddr: map[string]string{"eth0": "192.0.2.10"}},
+		Now: fixedNow,
+		Log: logr.Discard(),
 	}
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{}); err != nil {
@@ -61,5 +62,10 @@ func TestReconcileEndToEnd(t *testing.T) {
 	}
 	if row.UnderlayMTU != 1350 || row.LinkMTU != 1300 {
 		t.Errorf("node row MTU = underlay %d / link %d, want 1350 / 1300", row.UnderlayMTU, row.LinkMTU)
+	}
+	// The row's readiness is Compute's host self-check: eth0 resolved on the
+	// fake host, so the row is ready.
+	if !row.Ready || row.Message != "" {
+		t.Errorf("node row = %+v, want ready with no message", row)
 	}
 }

@@ -120,25 +120,6 @@ func (r *Reconciler) fillPublished(ctx context.Context, className string, rows [
 	return out
 }
 
-// interfaceAddrs resolves each of the class's interfaces to its address on
-// this node. An interface with no resolvable address is left out, so the
-// published row for it stays blank rather than claiming a wrong one.
-func (r *Reconciler) interfaceAddrs(interfaces []string) map[string]string {
-	if len(interfaces) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(interfaces))
-	for _, name := range interfaces {
-		if addr, err := r.Host.InterfaceAddr(name); err == nil {
-			out[name] = addr
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // writeClass writes this node's contribution to one class under the same
 // optimistic-concurrency discipline as writePortMap: re-read fresh, recompute
 // from the fresh object, write only the entries this node owns.
@@ -159,11 +140,14 @@ func (r *Reconciler) writeClass(ctx context.Context, name string, contrib krecon
 
 		next := class.DeepCopy()
 
+		// The row arrives complete from Compute: name, readiness, the
+		// message naming an unresolvable interface, and the addresses it
+		// could resolve. Only the MTU numbers are decided here, since they
+		// are read from the host after Compute ran.
 		if contrib.Node.Name != "" {
 			row := contrib.Node
 			row.UnderlayMTU = int32(hs.underlayMTU)
 			row.LinkMTU = int32(hs.linkMTU)
-			row.Addresses = r.interfaceAddrs(class.Spec.Interfaces)
 			upsertNodeRow(&next.Status.Nodes, row)
 		}
 

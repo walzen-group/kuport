@@ -137,8 +137,11 @@ func TestWritePortMapStatusPeerNotReported(t *testing.T) {
 }
 
 // TestWriteClassStatusPublishesAddresses confirms the class row this node
-// writes carries the resolved addresses of the class's interfaces, which is
-// the report the PortMap status writer reads for rows naming this node.
+// writes carries what Compute built: the readiness verdict, the message
+// naming the interface that did not resolve on the host, and the addresses
+// of the interfaces that did. writeClass stamps only the MTU numbers, so an
+// unresolvable interface surfaces as a message, never as a dropped row or a
+// silently missing address.
 func TestWriteClassStatusPublishesAddresses(t *testing.T) {
 	scheme := testScheme(t)
 	cls := &v1alpha1.PortMapClass{
@@ -155,11 +158,16 @@ func TestWriteClassStatusPublishesAddresses(t *testing.T) {
 		Client:   c,
 		NodeName: "edge-a",
 		Now:      fixedNow,
-		Host: &fakeHost{ifaceAddr: map[string]string{
-			"enp1s0": "203.0.113.9", "wt0": "100.64.93.143",
-		}},
+		Host:     &fakeHost{},
 	}
-	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{Name: "edge-a", Ready: true}}
+	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{
+		Name:    "edge-a",
+		Ready:   false,
+		Message: "interface missing0 not present",
+		Addresses: map[string]string{
+			"enp1s0": "203.0.113.9", "wt0": "100.64.93.143",
+		},
+	}}
 
 	if err := r.writeClass(context.Background(), "public", contrib, hostState{underlayMTU: 1400, linkMTU: 1350}); err != nil {
 		t.Fatalf("writeClass: %v", err)
@@ -171,6 +179,9 @@ func TestWriteClassStatusPublishesAddresses(t *testing.T) {
 	row := findNode(got.Status.Nodes, "edge-a")
 	if row == nil {
 		t.Fatal("own node row missing")
+	}
+	if row.Ready || row.Message != "interface missing0 not present" {
+		t.Errorf("row = %+v, want not-ready with Compute's message intact", row)
 	}
 	if row.Addresses["enp1s0"] != "203.0.113.9" || row.Addresses["wt0"] != "100.64.93.143" {
 		t.Errorf("row addresses = %v, want enp1s0 203.0.113.9 and wt0 100.64.93.143", row.Addresses)

@@ -85,6 +85,10 @@ func withLinks(links ...v1alpha1.LinkAllocation) classOpt {
 	return func(c *v1alpha1.PortMapClass) { c.Status.Links = links }
 }
 
+func withNodeRows(rows ...v1alpha1.NodeStatus) classOpt {
+	return func(c *v1alpha1.PortMapClass) { c.Status.Nodes = rows }
+}
+
 // pmOpt mutates a PortMap during construction.
 type pmOpt func(*v1alpha1.PortMap)
 
@@ -188,4 +192,18 @@ func findCond(conds []metav1.Condition, condType string) metav1.Condition {
 		}
 	}
 	return metav1.Condition{}
+}
+
+// resolvedMappingFor re-runs the resolution pass and returns the fully
+// resolved decision for one PortMap, so an agreement test can compare the
+// chosen endpoint and serving node across viewpoints even where the visible
+// Result of a non-owner carries nothing.
+func resolvedMappingFor(in Inputs, namespace, name string) *mapping {
+	idx := newIndex(in)
+	for _, m := range resolveMappings(in, idx) {
+		if m.pm.Namespace == namespace && m.pm.Name == name {
+			return m
+		}
+	}
+	return nil
 }
