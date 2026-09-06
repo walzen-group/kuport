@@ -1,0 +1,45 @@
+{
+  "files_changed": [
+    ".envrc",
+    ".gitignore",
+    "Makefile",
+    "config/crd/kuport.dev_portmapclasses.yaml",
+    "config/crd/kuport.dev_portmaps.yaml",
+    "flake.lock",
+    "flake.nix",
+    "go.mod",
+    "go.sum",
+    "internal/api/v1alpha1/conditions.go",
+    "internal/api/v1alpha1/groupversion_info.go",
+    "internal/api/v1alpha1/portmap_types.go",
+    "internal/api/v1alpha1/portmapclass_types.go",
+    "internal/api/v1alpha1/zz_generated.deepcopy.go",
+    "tools.go"
+  ],
+  "diffs_per_worker": {
+    "impl-task1-foundation": {
+      "verdict": "accepted",
+      "commit": "78b40f5",
+      "branch": "feat/initial-implementation",
+      "diff_summary": "15 files, 1745 insertions, committed by the meta after gate verification. Every file is inside the spec Target; README.md, docs/, and .cortex/ remain untracked and untouched (task 7 owns README and spec). Type files match the spec sketches field for field; generated CRDs carry every marker, CEL rule, default, and list map key; conditions.go covers the whole condition table.",
+      "deviations": [
+        {
+          "declared": true,
+          "item": "groupversion_info.go uses the apimachinery-only SchemeBuilder (runtime.NewSchemeBuilder) instead of controller-runtime's scheme.Builder",
+          "reason": "scheme.Builder is deprecated in controller-runtime v0.25; staticcheck SA1019 failed the lint gate",
+          "impact": "AddToScheme and GroupVersion keep their shape; nothing downstream changes"
+        },
+        {
+          "declared": true,
+          "item": "build-tagged tools.go pins controller-runtime and k8s.io/api",
+          "reason": "after deviation 1 nothing buildable imports them yet, so go mod tidy would drop the pins the brief required",
+          "impact": "all three dependencies stay pinned at coherent versions; the tag excludes tools.go from build, vet, and lint"
+        }
+      ],
+      "acceptance_gates": "all green; the recorded run is pasted verbatim in the gate evidence artifact below, including the server-side CEL rejection proven on an envtest control plane"
+    }
+  },
+  "gate_evidence": ".cortex/plans/2026-09-06-kuport-implementation/task-1-gate-evidence.md",
+  "whole_change_output": "Whole-change checks in wave-1 scope ran green from the repo root: go build ./... exit 0, go vet ./... exit 0, controller-gen CRD regeneration into .tmp/crd-check with diff -r config/crd .tmp/crd-check empty. go test ./..., golangci-lint run, helm lint/template, and the kubectl dry-run apply belong to later waves' scope and are expected absent. Repairs: none. Holds: none. Open items: impl-task1-foundation settled idle with its tab open; the worker declared itself done and awaits the orchestrator's teardown call.",
+  "deliverable_paths": []
+}

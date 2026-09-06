@@ -1,0 +1,27 @@
+{
+  "files_changed": [
+    "README.md",
+    "chart/crds/kuport.wlz.li_portmaps.yaml",
+    "config/crd/kuport.wlz.li_portmaps.yaml",
+    "deploy/crds/kuport.wlz.li_portmaps.yaml",
+    "docs/integration.md",
+    "docs/operations.md",
+    "docs/spec.md",
+    "internal/api/v1alpha1/portmap_types.go"
+  ],
+  "diffs_per_worker": {
+    "fix-docs": {
+      "spec": ".cortex/plans/2026-09-06-kuport-implementation/task-11-docs.md",
+      "commit": "3597700 on feat/initial-implementation (staged and committed by the meta per wave discipline; the worker left the tree uncommitted)",
+      "stat": "8 files changed, 163 insertions(+), 113 deletions(-)",
+      "full_diff": ".tmp/task11/wave5-commit.diff"
+    }
+  },
+  "gate_evidence": ".cortex/reports/handbacks/task-11-docs.md",
+  "whole_change_output": "Wave 5 (final) closed: one worker, task-11-docs, done and verified. Gate evidence: the worker's report (gate_evidence) carries its recorded make verify run (diff -ru config/crd .tmp/crd silent after the final edits), the acceptance grep over docs/ README.md internal/api with zero hits, the scoped git status, and the humanizer pass statement. I did not re-run the worker's gates. I read the diff against the spec: all nine change items land, and each rewritten passage matches the code at 8d68d2c (chooseEndpoint's accepting-node-first ranking by node name then pod name with the smallest-pod-name fallback; decideRole's serving-node rule; resolveProgrammed's gate of serving row plus landed remote-pod slot with reason AllNodesReady on true; statusOwner's serving-node-else chain; servingRowReady's message shapes; publishedRows narrowed to the serving node; the emitMapping split the docs' emission lists restate; the PortMapClass watch the propagation-window paragraph leans on). Old-rule vocabulary greps zero hits repo-side, and the three CRD copies are byte-identical to the regenerated output. Whole-change check in the pinned toolchain from the repo root, all green with log at .tmp/wave5-gates.log: go build ./..., go vet ./..., go test ./... -count=1 (all packages ok), golangci-lint run (0 issues), make verify (CRD diff silent), helm lint chart/ (0 failed). Committed as 3597700 and pushed to origin/feat/initial-implementation; CI on the pushed tip: GitHub Actions run 34040058752 completed with success on 3597700e8f0bf3aeea441ae22e4621a74db39c30. Merge gate: this is the final wave; merge to master is the orchestrator's next step, gates green on the pushed tip. Open items the worker correctly left outside its Target (stale doc comments, no behavior effect): internal/api/v1alpha1/portmapclass_types.go:15 Interfaces still says per accepting node, and internal/agent/status.go fillPublished still describes the now-unreachable cross-node row resolution path; fold both into a small follow-up if prose hygiene matters before release. No holds.",
+  "deliverable_paths": [
+    ".cortex/reports/handbacks/task-11-docs.md",
+    ".tmp/task11/wave5-commit.diff",
+    ".tmp/wave5-gates.log"
+  ]
+}

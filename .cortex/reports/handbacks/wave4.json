@@ -1,0 +1,78 @@
+{
+  "files_changed": [
+    "internal/reconcile/endpoints.go",
+    "internal/reconcile/reconcile.go",
+    "internal/reconcile/links.go",
+    "internal/reconcile/status.go",
+    "internal/reconcile/conflicts.go",
+    "internal/reconcile/endpoints_test.go",
+    "internal/reconcile/helpers_test.go",
+    "internal/reconcile/reconcile_test.go",
+    "internal/reconcile/status_test.go",
+    "internal/agent/agent.go",
+    "internal/agent/agent_test.go",
+    "internal/agent/inputs.go",
+    "internal/agent/inputs_test.go",
+    "internal/agent/status.go",
+    "internal/agent/status_test.go",
+    "internal/datapath/netlink.go",
+    "internal/datapath/apply.go",
+    "internal/datapath/apply_test.go",
+    "internal/datapath/netlink_test.go",
+    "internal/datapath/netlink_kernel_test.go",
+    "chart/templates/_helpers.tpl",
+    "chart/templates/rbac.yaml",
+    "chart/values.yaml",
+    "chart/README.md",
+    "deploy/rbac.yaml",
+    ".github/workflows/ci.yaml",
+    ".github/workflows/release.yaml"
+  ],
+  "diffs_per_worker": {
+    "fix-semantics": {
+      "task": "task-8 (F1, F2, F3, F9, corev1.Service watch removal)",
+      "commits": ["879f902 fix: deterministic single-serving semantics and honest status (15 files, +677 -153)"],
+      "diff_artifact": ".tmp/task8/my.diff",
+      "gate_evidence": [
+        ".tmp/task8-reds/red-phase1-behavioral.log",
+        ".tmp/task8-reds/red-phase2-interface-check.log",
+        ".tmp/task8-reds/green-phase-tests.log",
+        ".tmp/task8-reds/gates-final.log",
+        ".cortex/reports/handbacks/task-8-semantics.md"
+      ],
+      "meta_verification": "Full production diff read against spec: global endpoint rank (accepting-node, then targetRef pod name, then node, then addr), serving node S shared computation, refusal precedence None > RPMAN, nodeRowFor honest readiness with the spec.md:225-228 message shape, resolveProgrammed gated on landed rows + landed slot, slotOrZero deleted with every slot-carrying object behind landedSlot. Grep proofs re-run by meta: zero corev1.Service in internal/agent, zero slotOrZero/slotFor repo-wide, markBase only inside buildLinkParams with guarded callers. Four spec gates recorded exit 0 with verbatim output. Meta spot-checked the five flipped existing tests: strict assertions, none weakened."
+    },
+    "fix-linkapply": {
+      "task": "task-9 (F7, F10)",
+      "commits": ["fe0b3f2 fix: reconcile VXLAN link underlays; bring links up before nftables (5 files, +659 -6)"],
+      "diff_artifact": "git show fe0b3f2",
+      "gate_evidence": [
+        ".tmp/f7-red-run.txt",
+        ".tmp/f7-green-run.txt",
+        ".tmp/f7-kernel-run.txt",
+        ".tmp/task9-gates.txt",
+        ".tmp/f7-probe-out.txt",
+        ".tmp/f7-ippattern-probe.txt",
+        ".cortex/plans/2026-09-06-kuport-implementation/task-9-gate-evidence.md"
+      ],
+      "meta_verification": "Full production diff read: underlayOf extraction, pure linkActionFor decision, retarget branch with in-place RTM_NEWLINK (device index, UP state and /31 kept), rebuild branch only where the kernel cannot rekey (VNI, dst port, family flip, unreadable underlay), Apply now links-before-nft with rules/routes last. Red run shows the missing comparison failing by name on four cases while the no-churn companion passes pre-fix; green includes a real-kernel netns proof on 6.18.33.2-WSL2 and a fresh-dump no-update-loop pin. Goldens unchanged. The pinned datapath.State seam and NetlinkConn are untouched; the LinkModify deviation is probe- and kernel-source-grounded."
+    },
+    "fix-deploy-ci": {
+      "task": "task-10 (F5, F6, F8, OCI chart push)",
+      "commits": ["8fea956 fix: chart tag default, RBAC narrowed to actual calls, envtest CI, OCI chart push (7 files, +92 -33)"],
+      "diff_artifact": ".tmp/task10/my.diff",
+      "gate_evidence": [
+        ".tmp/task10/render-before.yaml",
+        ".tmp/task10/render-after.yaml",
+        ".cortex/reports/handbacks/task-10-fix-deploy-ci.md"
+      ],
+      "meta_verification": "Full diff read: kuport.image fallback is the spec's exact printf v%s form; both RBAC files narrowed to list+watch on cache kinds and update-only on status subresources with the grep inventory behind each drop; services rule gone from both (meta grep: zero matches) and it landed after 879f902 carried the watch removal, so the tree never lacked the rule while the watch existed; envtest job wired with a standalone asset assignment so a failed fetch aborts; OCI push to oci://ghcr.io/walzen-group/kuport with VERSION via job-level GITHUB_ENV. helm lint and envtest 13.622s recorded green; actionlint 1.7.12 + shellcheck clean."
+    }
+  },
+  "gate_evidence": ".cortex/plans/2026-09-06-kuport-implementation/wave-4-gate-evidence.md",
+  "whole_change_output": "Branch feat/initial-implementation tip 8fea956, 3 commits ahead of origin at e5ef0c8. Commits landed in wave order with the mandated coupling: 879f902 (task-8, carries the Service-watch removal) before 8fea956 (task-10, removes the services RBAC rule); fe0b3f2 (task-9) between. Meta whole-change battery at the merged tip, all exit 0: go build; go vet; go test ./... -count=1 all ok (agent 0.187s, datapath 0.652s, reconcile 0.009s); golangci-lint 0 issues; make verify, no CRD drift; helm lint chart/, 0 failed. Envtest tier run once by meta on the final tree with cached 1.37.0 assets: ok internal/agent 12.314s (task-10's own gate ran at pristine HEAD; task-8 since changed the agent package, so meta closed that gap). CI state: green at pushed tip e5ef0c8 (run 34033426630); the three wave-4 commits are unpushed, and push plus CI re-run are orchestrator actions. Merge gate: merge to master waits until wave 5 (task-11 docs) lands and the whole-change gates are green on the pushed tip; wave 4's half is done and green locally. Repairs: fix-linkapply held its turn open after its completion push on a background wait aimed at this meta; corrected by A2A steer plus one interrupt, worker now idle. Holds: none, no unattributable composer text. Open items: task-8 deviation 3 (with >1 accepting node every agent incl. S computes False/RPMAN and S writes it, so such a mapping never reads True while the class selects >1 node; an interpretation for audit, task-11 docs must state whichever reading stands); task-8 deviation 6 (Published still lists every accepting node, narrowing to S is a docs/follow-up call); task-10 named gap (real ghcr push runs only on a release tag; wiring covered by actionlint); task-9 note (the committed suite gains the first netns harness, skip-guarded).",
+  "deliverable_paths": [
+    ".cortex/plans/2026-09-06-kuport-implementation/wave-4-gate-evidence.md",
+    ".cortex/reports/2026-09-06-whole-branch-final-review.md"
+  ]
+}

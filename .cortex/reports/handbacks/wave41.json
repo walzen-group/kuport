@@ -1,0 +1,25 @@
+{
+  "files_changed": [
+    "internal/api/v1alpha1/conditions.go",
+    "internal/reconcile/endpoints.go",
+    "internal/reconcile/reconcile.go",
+    "internal/reconcile/status.go",
+    "internal/reconcile/reconcile_test.go",
+    "internal/reconcile/status_test.go",
+    "internal/reconcile/helpers_test.go"
+  ],
+  "diffs_per_worker": {
+    "fix-serving-status": {
+      "spec": ".cortex/plans/2026-09-06-kuport-implementation/task-8b-serving-true.md",
+      "commit": "8d68d2c on feat/initial-implementation (staged and committed by the meta per wave discipline; the worker left the tree uncommitted)",
+      "stat": "7 files changed, 168 insertions(+), 103 deletions(-)",
+      "full_diff": ".tmp/task8b/wave41-commit.diff"
+    }
+  },
+  "gate_evidence": ".cortex/reports/handbacks/task-8b-serving-true.md",
+  "whole_change_output": "Wave 4.1 closed: one worker, task-8b, done and verified. Gate evidence: the worker's report (gate_evidence) carries its recorded red run of five behaviors reading RemotePodMultipleAcceptingNodes and the green run verbatim; supporting logs at .tmp/task8b/red.log, .tmp/task8b/green-reconcile.log, .tmp/task8b/gates.log. The red run was logged against HEAD 8fea956; I verified all seven touched paths are byte-identical between 879f902 and that HEAD, so it satisfies the spec's baseline of the 879f902 code surface. I read the diff against the spec: the multi-accept early-False branch is gone from decideRole, the Programmed gate checks only the serving node's row plus the landed S-holder return-path slot, Published lists only S's interfaces, and the RPMAN constant is deleted with every code reference. Flipped tests name the 2026-09-06 adjudication in their comments; nothing was weakened. Whole-change run in the pinned devshell on the exact committed tree: go build, go vet, go test ./... -count=1, golangci-lint run (0 issues), make verify (regenerated CRDs match, no drift), helm lint chart/ (0 failed). All green; outputs at .tmp/task8b/meta-verification.log and .tmp/task8b/meta-verification-2.log. The worker cited a lint log that does not exist; my own lint run closes that gap. Commit 8d68d2c is the branch tip, ahead 1 of origin and unpushed (push is the orchestrator's call), so CI has not run on this tip yet. Merge gate: merge waits until wave 5 docs land and the gates are green on the pushed tip. Open items for task-11, accepted as deviations rather than holds: (A) four docs lines (docs/integration.md:326, docs/operations.md:81, docs/spec.md:196 and 201) and the plan-index conditions-table row still name RPMAN; the code surface is clean; docs belong to task-11, whose brief must carry constraint 14's conditions-table amendment. (B) the spec phrase holder-node-row-ready is implemented as the landed S-holder slot plus both link addresses, because a remote mapping's holder never writes a class row and a literal row gate could never open; task-11 must document the gate that exists. (C) the Published field comment in portmap_types.go still describes one row per accepting node and feeds the three generated CRD copies; fixing it means a comment edit plus manifest regeneration, left for task-11 or a regen follow-up. Repairs and holds during the wave: none; no steer was needed, the worker ran spec-clean start to finish.",
+  "deliverable_paths": [
+    ".cortex/reports/handbacks/task-8b-serving-true.md",
+    ".tmp/task8b/wave41-commit.diff"
+  ]
+}

@@ -1,0 +1,211 @@
+{
+  "files_changed": [
+    "internal/datapath/state.go",
+    "internal/datapath/render.go",
+    "internal/datapath/text.go",
+    "internal/datapath/nft.go",
+    "internal/datapath/netlink.go",
+    "internal/datapath/apply.go",
+    "internal/datapath/render_test.go",
+    "internal/datapath/text_test.go",
+    "internal/datapath/apply_test.go",
+    "internal/datapath/testdata/accepting-single-port.golden",
+    "internal/datapath/testdata/accepting-port-range.golden",
+    "internal/datapath/testdata/target-remote.golden",
+    "internal/datapath/testdata/same-node.golden",
+    "internal/datapath/testdata/empty.golden",
+    "go.mod",
+    "go.sum",
+    "internal/reconcile/reconcile.go",
+    "internal/reconcile/conflicts.go",
+    "internal/reconcile/endpoints.go",
+    "internal/reconcile/links.go",
+    "internal/reconcile/status.go",
+    "internal/reconcile/reconcile_test.go",
+    "internal/reconcile/conflicts_test.go",
+    "internal/reconcile/endpoints_test.go",
+    "internal/reconcile/links_test.go",
+    "internal/reconcile/status_test.go",
+    "internal/reconcile/helpers_test.go",
+    "deploy/namespace.yaml",
+    "deploy/serviceaccount.yaml",
+    "deploy/rbac.yaml",
+    "deploy/daemonset.yaml",
+    "deploy/kustomization.yaml",
+    "deploy/crds/kustomization.yaml",
+    "deploy/crds/kuport.dev_portmapclasses.yaml",
+    "deploy/crds/kuport.dev_portmaps.yaml",
+    "chart/Chart.yaml",
+    "chart/values.yaml",
+    "chart/README.md",
+    "chart/templates/_helpers.tpl",
+    "chart/templates/rbac.yaml",
+    "chart/templates/serviceaccount.yaml",
+    "chart/templates/daemonset.yaml",
+    "chart/templates/classes.yaml",
+    "chart/crds/kuport.dev_portmapclasses.yaml",
+    "chart/crds/kuport.dev_portmaps.yaml",
+    "config/samples/kuport.dev_v1alpha1_portmapclass.yaml",
+    "config/samples/kuport.dev_v1alpha1_portmap.yaml",
+    "Dockerfile",
+    ".dockerignore",
+    ".golangci.yaml",
+    ".github/workflows/ci.yaml",
+    ".github/workflows/release.yaml"
+  ],
+  "diffs_per_worker": {
+    "impl-task2-datapath": {
+      "verdict": "accepted",
+      "commit": "d7bfbd0",
+      "branch": "feat/initial-implementation",
+      "diff_summary": "16 files, +1605. internal/datapath/ in full: state.go verbatim against the pinned contract (checked byte-for-byte against the index copy), semantic Rule struct with nftExprs and nftText both deriving from it, one-transaction nftables apply, netlink reconcile-by-comparison owning only kup-* links, 0x6b70**** marks and named tables, LinkMTU/InterfaceMTU helpers, five golden files matching the smoke-test ruleset (chain names kup-pre/kup-post/kup-mangle, dstnat-10/srcnat-10/mangle+10 headers, dport ranges, oifname != \"cilium_*\" negation, mark 0x6b700001). go.mod/go.sum gained nftables v0.3.0 and netlink v1.3.1, looked up current.",
+      "deviations": [
+        {
+          "declared": true,
+          "item": "nft -c needs root on this host",
+          "reason": "nftables 1.1.6 initializes a netfilter netlink cache even in check mode; as uid 1000 the gate fails with cache initialization failed: Operation not permitted",
+          "impact": "worker ran sudo -n nft -c -f; all five goldens accepted. Goldens are correct; only the invocation needs privilege. CI or the gate script should account for it"
+        },
+        {
+          "declared": true,
+          "item": "LinkAddr renders as /31 per the pinned state.go contract",
+          "reason": "spec.md prose says /30 but state.go is a netip.Prefix carrying its own length",
+          "impact": "no code choice baked in; pinned contract unchanged"
+        },
+        {
+          "declared": true,
+          "item": "go mod tidy promoted golang.org/x/sys to a direct dependency",
+          "reason": "nft.go imports golang.org/x/sys/unix directly",
+          "impact": "correct module hygiene; transitive mdlayher/netlink, mdlayher/socket, vishvananda/netns, google/go-cmp"
+        }
+      ],
+      "acceptance_gates": "all green; recorded run in task-2-gate-evidence.md: go build/vet silent, go test ./internal/datapath/... -v all PASS (idempotence, teardown, owned-only reconcile, determinism, golden, non-empty exprs, same-node), -count=10 ok, golangci-lint 0 issues, all 5 goldens accepted by nft -c"
+    },
+    "impl-task3-reconcile": {
+      "verdict": "accepted",
+      "commit": "95bc0c0",
+      "branch": "feat/initial-implementation",
+      "diff_summary": "11 files, +2397. internal/reconcile/ in full: pure Compute(Inputs) Result with injected Now, validation in spec order with deterministic conflict ordering (creationTimestamp asc, namespace/name bytewise), endpoint choice (local wins, else lowest targetRef.name), recorded-claim link allocation with lowest-free slot in sorted key order, /31 split by node-name order, mark 0x6b700000|slot, table 200+slot, kup-<hash8> names, loop-guard 101/divert 102, 24h GC, single-writer status. datapath.State imported unchanged from task 2's commit.",
+      "deviations": [
+        {
+          "declared": true,
+          "item": "statusOwner extends the single-writer rule to endpoint-less mappings",
+          "reason": "spec names only the endpoint holder as writer; refused mappings (NoReadyEndpoint, ClassNotFound) have no endpoint, so the worker picked first accepting node by name, else first cluster node by name",
+          "impact": "every refusal still gets exactly one deterministic writer; agreement tests pass"
+        },
+        {
+          "declared": true,
+          "item": "non-accepting endpoint holder emits ClaimLinks with a zero Node row",
+          "reason": "spec requires the endpoint holder (usually a target node) to propose the claim; only accepting nodes emit a Nodes row, GC, and class conditions",
+          "impact": "claims get proposed by the single writer the spec names"
+        },
+        {
+          "declared": true,
+          "item": "subnet exhausted sets class Ready=False/SubnetExhausted only",
+          "reason": "spec fixes the class-level condition; mapping simply gets no link device",
+          "impact": "class condition per spec; no invented per-mapping reason"
+        },
+        {
+          "declared": true,
+          "item": "TunnelOK/CNIVxlanPort left off Inputs",
+          "reason": "spec permits deferring tunnel-mode and vxlan-port-collision conditions to task 6, which needs host access",
+          "impact": "class conditions for tunnel mode are task 6's to overlay"
+        },
+        {
+          "declared": true,
+          "item": "PublishedAddress.Address left empty",
+          "reason": "spec: iface-to-address not resolvable from the API alone in the general case",
+          "impact": "task 6 fills it from the host"
+        }
+      ],
+      "acceptance_gates": "all green; recorded run in task-3-gate-evidence.md: go build/vet silent, go test -v -count=1 ok (13 tests / 37 subtests), -count=10 ok, golangci-lint 0 issues; TestDeterminismUnderShuffle x20 and TestAgentAgreement both present and passing"
+    },
+    "impl-task4-deploy": {
+      "verdict": "accepted",
+      "commit": "79edf8a",
+      "branch": "feat/initial-implementation",
+      "diff_summary": "20 files, +1819. deploy/ plain manifests (namespace kuport-system, SA kuport-agent, ClusterRole/Binding with exactly the spec verb sets and no leases, DaemonSet hostNetwork + system-node-critical + NET_ADMIN-only + RollingUpdate maxUnavailable 1, kustomization with images entry), chart/ mirroring deploy field-for-field with the spec image helper and classes passthrough, CRDs copied byte-identical from config/crd into chart/crds/ and deploy/crds/, two sample classes and two sample PortMaps matching the spec examples.",
+      "deviations": [
+        {
+          "declared": true,
+          "item": "deploy/kustomization.yaml lists CRDs as copies under deploy/crds/ instead of ../config/crd",
+          "reason": "kubectl kustomize refuses to load anything outside the deploy/ load root, and config/crd/ has no kustomization.yaml",
+          "impact": "task 5's kustomize edit set image and kubectl kustomize deploy/ work unchanged; the bundle still carries the CRDs; refresh command commented in-file"
+        },
+        {
+          "declared": true,
+          "item": "no readiness probe",
+          "reason": "cmd/kuport-agent does not exist yet (task 6); spec says leave it out rather than invent a port",
+          "impact": "follow-up: add readinessProbe httpGet /readyz :8081 and liveness /healthz once task 6 lands"
+        },
+        {
+          "declared": true,
+          "item": "DaemonSet carries env NODE_NAME and LOG_LEVEL",
+          "reason": "task 6's flag table marks NODE_NAME required via the downward API; values.yaml logLevel must reach the container",
+          "impact": "mirrored in deploy/ and chart so defaults render identically"
+        },
+        {
+          "declared": true,
+          "item": "chart templates no Namespace object",
+          "reason": "helm install owns the namespace via -n/--create-namespace; a templated Namespace conflicts or dead-ends",
+          "impact": "namespaced objects follow .Release.Namespace; README installs into kuport-system"
+        },
+        {
+          "declared": true,
+          "item": "chart default tag :0.1.0 vs deploy :v0.1.0",
+          "reason": "appVersion 0.1.0 renders the default tag without the v prefix; deploy pins :v0.1.0",
+          "impact": "by spec; task 5's release rewrite re-syncs both from the tag"
+        }
+      ],
+      "acceptance_gates": "all green; recorded run in task-4-gate-evidence.md against an envtest control plane (kubectl 1.37 does discovery even for --dry-run=client; host kubeconfig points at a down docker-desktop): every dry-run lists objects as (dry run) with no error, helm lint 0 failed, all three renders accepted, all three negative checks pass"
+    },
+    "impl-task5-ci": {
+      "verdict": "accepted",
+      "commit": "194216b",
+      "branch": "feat/initial-implementation",
+      "diff_summary": "5 files, +409. Two-stage Dockerfile (golang:1.26.8-alpine3.24 pinned by tag+digest, CGO_ENABLED=0 -trimpath with VERSION ldflag, scratch final, USER 0, entrypoint only, no CA bundle), .dockerignore with all required excludes, .golangci.yaml on the v2 schema with all ten required linters/formatters, ci.yaml (push any branch + PR; check/generated/image/chart jobs on the nix toolchain; make verify fails the build on drift; concurrency cancels CI), release.yaml (v* tags; semver gate with clear error; check gate mirrored; digest captured, in step summary, and baked into deploy/ render via kustomize edit set image with a @sha256: grep guard; chart packaged from a patched .tmp copy; CRD bundle; gh-release attaches all three; no cancel-in-progress).",
+      "deviations": [
+        {
+          "declared": true,
+          "item": "kustomize edit set image has no directory flag (v5.8.1)",
+          "reason": "spec snippet implied repo-root invocation; verified locally the flag does not exist",
+          "impact": "release.yaml cd's into deploy/, renders, and greps for @sha256: to fail loudly if the pin did not take"
+        },
+        {
+          "declared": true,
+          "item": "release check gate mirrors ci.yaml inline instead of workflow_call",
+          "reason": "spec fixes ci.yaml triggers at push + PR, which workflow_call cannot reuse without changing them",
+          "impact": "sync-maintenance comment in the file"
+        },
+        {
+          "declared": true,
+          "item": "chart packaging patches a .tmp copy; source chart/ untouched",
+          "reason": "helm package takes version flags but image.digest is a values key",
+          "impact": "output renamed to kuport-<version>.tgz regardless"
+        },
+        {
+          "declared": true,
+          "item": "id-token: write unused; no signing/SBOM/attestation",
+          "reason": "spec says declare but do not build them",
+          "impact": "candidates noted in report only"
+        },
+        {
+          "declared": true,
+          "item": "semver gate rejects prerelease/build suffixes",
+          "reason": "the shared major.minor tag and chart version assume stable releases",
+          "impact": "clear ::error:: message"
+        },
+        {
+          "declared": true,
+          "item": "action pins moved past the spec's illustrative versions",
+          "reason": "spec said several of its versions are stale and to check current majors",
+          "impact": "checkout v7.0.1, install-nix-action v31.11.1, magic-nix-cache v14, buildx v4.3.0, login v4.6.0, build-push v7.3.0, gh-release v3.0.3 — verified via the APIs on 2026-09-06"
+        }
+      ],
+      "acceptance_gates": "actionlint clean on both workflows, yamllint exit 0 (line-length warnings only at relaxed level), golangci-lint config verify OK (v2 schema, 2.13.2), lint clean on committed code. Docker gates blocked: cmd/kuport-agent absent (task 6 owns it); exact commands recorded in task-5-gate-evidence.md and queued to run once the binary lands. Dockerfile mechanics proven via a .tmp stub-context probe (build OK, version ldflag printed, /bin/sh exit 127, 1.6MB image)"
+    }
+  },
+  "gate_evidence": ".cortex/plans/2026-09-06-kuport-implementation/wave-2-gate-evidence.md",
+  "whole_change_output": "Whole-change checks ran green from /home/nixos/repos/kuport on branch feat/initial-implementation after all four commits: go build ./... exit 0; go vet ./... exit 0; go test ./... all ok (datapath and reconcile, api has no test files); golangci-lint run 0 issues; controller-gen CRD regeneration into .tmp/crd-check with diff -r config/crd .tmp/crd-check empty; helm lint chart/ 0 failed; helm template chart/ exit 0. The kubectl dry-run apply cannot run against the host kubeconfig (docker-desktop server down; kubectl 1.37 does discovery even for --dry-run=client, the recorded task-1/task-4 situation), so it ran against a fresh envtest control plane (task 4's .tmp/kubeup harness, KUBEBUILDER_ASSETS 1.33.0): kubectl apply --dry-run=client -f config/crd/ -f config/samples/ lists every object as (dry run) with no error; harness stopped after the run. Repairs: none. Holds: none. Open items: (1) task 5's docker image gates (build, --version, no-shell negative, size under 50MB) wait on task 6 landing cmd/kuport-agent — commands are recorded in task-5-gate-evidence.md; (2) task 4's readiness probe follow-up once task 6 exposes /healthz and /readyz; (3) the nft -c root requirement on this host should shape the CI gate invocation. No cluster tests ran — no test cluster exists; task 2's golden tests against the real nft parser are the smoke test and they passed. README.md, docs/, and .cortex/ remain untracked and untouched (task 7 owns them).",
+  "deliverable_paths": []
+}
