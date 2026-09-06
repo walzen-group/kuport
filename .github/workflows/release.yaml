@@ -1,7 +1,8 @@
 # Release pipeline for kuport-agent. Triggered by a version tag (v1.2.3), it
 # publishes an immutable image, renders the deployment manifests pinned to
-# that image's digest, packages the chart, and attaches everything to a
-# GitHub Release. The tag itself is created by hand; nothing here tags.
+# that image's digest, packages the chart and pushes it to ghcr.io as an OCI
+# artifact, and attaches everything to a GitHub Release. The tag itself is
+# created by hand; nothing here tags.
 
 name: Release
 
@@ -174,6 +175,22 @@ jobs:
               --version "$VERSION" --app-version "$VERSION" \
               --destination .tmp/release
             mv .tmp/release/*.tgz "kuport-$VERSION.tgz"
+          '
+
+      # The packaged tarball is also pushed to ghcr.io as an OCI chart
+      # artifact, so a Flux-style consumer can pull
+      # oci://ghcr.io/walzen-group/kuport by version with the baked
+      # image.digest intact. The GitHub Release keeps the tarball attachment.
+      - name: Push the chart to ghcr.io as an OCI artifact
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # shellcheck disable=SC2016  # the inner bash expands these
+          nix develop -c bash -c '
+            set -euo pipefail
+            helm registry login ghcr.io -u "$GHCR_USER" -p "$GHCR_TOKEN"
+            helm push "kuport-$VERSION.tgz" oci://ghcr.io/walzen-group/kuport
           '
 
       # The CRDs move on their own schedule (schema changes only), so they

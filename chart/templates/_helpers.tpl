@@ -53,12 +53,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
-The image reference: digest first, then tag, then the chart appVersion.
+The image reference: digest first, then tag, then v<appVersion>. The v prefix
+matches the tag the release pipeline pushes (v1.2.3 next to the rolling 1.2
+minor tag), so the fallback names a published tag.
 */}}
 {{- define "kuport.image" -}}
 {{- if .Values.image.digest -}}
 {{ .Values.image.repository }}@{{ .Values.image.digest }}
 {{- else -}}
-{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
 {{- end -}}
 {{- end -}}

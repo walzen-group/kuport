@@ -46,6 +46,10 @@ than patching YAML by hand. Where this chart and `deploy/` disagree,
    Expected result: `STATUS: deployed` and
    `kubectl get portmapclass public` lists the class.
 
+A plain `helm install ./chart` from a git checkout pulls the default tag,
+`v<appVersion>`. That tag exists only after the matching release has been
+cut. Pin `image.tag` or `image.digest` until then.
+
 Each `classes` entry is a class name mapped to a PortMapClass spec, written
 out as its rendered manifest verbatim. A field added to the API later needs no
 chart change.
@@ -53,9 +57,12 @@ chart change.
 ## Image reference
 
 The helper resolves the image in this order: `image.digest`, then `image.tag`,
-then the chart `appVersion`. Release artifacts default `image.digest` to the
-pushed digest, so the pin travels with the chart version and the tag stays for
-people to read.
+then `v<appVersion>`. Release images are published under a tag with the v
+prefix (`v1.2.3`), so the fallback names a tag a release publishes.
+Release artifacts default `image.digest` to the pushed digest, so the pin
+travels with the chart version and the tag stays for people to read. The
+packaged chart is also pushed to `oci://ghcr.io/walzen-group/kuport`, so a
+Flux-style consumer can pull it by version with that digest intact.
 
 ## CRDs
 
@@ -85,7 +92,7 @@ kubectl delete -f chart/crds/
 | Key | Default | Meaning |
 | --- | --- | --- |
 | image.repository | ghcr.io/walzen-group/kuport-agent | Where the agent image is pulled from |
-| image.tag | "" (appVersion) | Image tag when no digest is set |
+| image.tag | "" (v<appVersion>) | Image tag when no digest is set |
 | image.digest | "" | `sha256:...` pin; when set it wins over the tag |
 | image.pullPolicy | IfNotPresent | Pull policy for the agent container |
 | nameOverride / fullnameOverride | "" | Name parts used by the object names |

@@ -1,5 +1,9 @@
-# The agent reads its inputs and writes only its own status. There is no
-# lease rule: kuport runs one independent agent per node and elects no leader.
+# The agent reads its inputs and writes only its own status. Input reads go
+# through the informer cache, so list and watch are the whole API surface for
+# those kinds; get is granted only to the uncached cilium-config reader.
+# Status writes are whole-subresource Updates, so update is the only verb the
+# status rules need. There is no lease rule: kuport runs one independent agent
+# per node and elects no leader.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -10,28 +14,25 @@ metadata:
 rules:
   - apiGroups: ["kuport.wlz.li"]
     resources: ["portmapclasses"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   - apiGroups: ["kuport.wlz.li"]
     resources: ["portmapclasses/status"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["update"]
   - apiGroups: ["kuport.wlz.li"]
     resources: ["portmaps"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   - apiGroups: ["kuport.wlz.li"]
     resources: ["portmaps/status"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["update"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   # The tunnel-mode host check reads one ConfigMap, kube-system/cilium-config.
   # A ClusterRole cannot scope by namespace, so resourceNames scopes the get to
   # that one name.

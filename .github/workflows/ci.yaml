@@ -68,6 +68,36 @@ jobs:
       - name: make verify
         run: make verify
 
+  envtest:
+    name: Envtest against a real API server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: cachix/install-nix-action@v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      # The suite is build-tagged, and it skips itself when
+      # KUBEBUILDER_ASSETS is unset or empty, which would leave the job
+      # green with nothing run. The asset path is therefore resolved by a
+      # standalone assignment: when setup-envtest cannot fetch the 1.37.0
+      # control-plane binaries (a fresh runner downloads them on first use),
+      # set -e aborts this step there. The prefix form,
+      # KUBEBUILDER_ASSETS=$(setup-envtest use ...) go test, ignores the
+      # failed fetch, exports an empty path, and runs the skipping suite.
+      - name: Run the tagged envtest suite
+        run: |
+          # shellcheck disable=SC2016  # the inner bash expands these
+          nix develop -c bash -c '
+            set -euo pipefail
+            assets=$(setup-envtest use 1.37.0 -p path)
+            KUBEBUILDER_ASSETS="$assets" go test -tags envtest ./internal/agent/...
+          '
+
   image:
     name: Image builds for linux/amd64
     runs-on: ubuntu-latest

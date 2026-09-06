@@ -2,7 +2,8 @@
 image:
   # Repository the agent image is pulled from.
   repository: ghcr.io/walzen-group/kuport-agent
-  # Image tag. Empty means the chart appVersion.
+  # Image tag. Empty means v<appVersion>, the form the release pipeline
+  # publishes, like v0.1.0.
   tag: ""
   # Image digest, like sha256:... . When set it wins over tag, and this is
   # what a release pins.
