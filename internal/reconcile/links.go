@@ -119,18 +119,14 @@ func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) c
 	return a
 }
 
-// landedSlot returns the slot of a mapping's return-link pair when the claim
-// has landed in the class status, and false while it is still propagating.
-// Marks, divert rules, links and routes all carry the slot; emitting any of
-// them against a tentative allocation lets a lost claim race mark packets
-// with a slot another pair already holds.
-func (a classAlloc) landedSlot(m *mapping) (int, bool) {
-	return a.landedSlotFor(m, m.effAccepting)
-}
-
-// landedSlotFor is landedSlot for one named peer, which is what Multi serving
-// needs: the pod's node holds a link per remote programmer, each on its own
-// slot, so a reply can leave by the link its request arrived on.
+// landedSlotFor returns the slot of the return-link pair between one peer and
+// the mapping's endpoint node, when the claim has landed in the class status,
+// and false while it is still propagating. Marks, divert rules, links and
+// routes all carry the slot; emitting any of them against a tentative
+// allocation lets a lost claim race mark packets with a slot another pair
+// already holds. It takes the peer rather than reading one off the mapping
+// because Multi serving gives the pod's node a link per remote programmer,
+// each on its own slot, so a reply can leave by the link its request arrived on.
 func (a classAlloc) landedSlotFor(m *mapping, peer string) (int, bool) {
 	key := pairKey(peer, m.endpoint.node)
 	la, ok := a.existing[key]
