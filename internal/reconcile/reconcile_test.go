@@ -585,3 +585,124 @@ func shuffleInputs(in Inputs, rng *rand.Rand) Inputs {
 	rng.Shuffle(len(in.Slices), func(i, j int) { in.Slices[i], in.Slices[j] = in.Slices[j], in.Slices[i] })
 	return in
 }
+
+// multiWorld is a three-worker class in Multi serving with the pod on node-c,
+// so every accepting node forwards and two of them need a return link. Claims
+// for both pairs are present so the links can build at known slots.
+func multiWorld(runOn string, opts ...classOpt) Inputs {
+	all := append([]classOpt{
+		withMultiServing(),
+		withLinks(claim("node-a", "node-c", 0), claim("node-b", "node-c", 1)),
+		withNodeRows(
+			v1alpha1.NodeStatus{Name: "node-a", Ready: true},
+			v1alpha1.NodeStatus{Name: "node-b", Ready: true},
+			v1alpha1.NodeStatus{Name: "node-c", Ready: true},
+		),
+	}, opts...)
+	return Inputs{
+		NodeName: runOn,
+		Nodes: []*corev1.Node{
+			node("node-a", "10.0.0.1", nil),
+			node("node-b", "10.0.0.2", nil),
+			node("node-c", "10.0.0.3", nil),
+		},
+		Namespaces: []*corev1.Namespace{ns("games", nil)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b", "node-c"}, all...)},
+		PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
+		Slices: []*discoveryv1.EndpointSlice{
+			slice("games", "a", endpointSpec{addr: "10.244.9.9", node: "node-c", target: "pod-a"}),
+		},
+		Now: metav1.NewTime(baseTime),
+	}
+}
+
+// TestMultiServingEveryAcceptingNodeForwards is the point of the mode: a routed
+// virtual address may land on any accepting node, so every one of them must
+// carry the DNAT rules rather than only the serving node.
+func TestMultiServingEveryAcceptingNodeForwards(t *testing.T) {
+	for _, n := range []string{"node-a", "node-b", "node-c"} {
+		res := Compute(multiWorld(n))
+		if len(res.State.DNAT) != 1 {
+			t.Errorf("%s: DNAT = %+v, want one rule (every accepting node forwards)", n, res.State.DNAT)
+			continue
+		}
+		if got := res.State.DNAT[0].ToAddr.String(); got != "10.244.9.9" {
+			t.Errorf("%s: DNAT target = %s, want the chosen pod 10.244.9.9", n, got)
+		}
+	}
+}
+
+// TestMultiServingUsesConntrackReturn covers the reason Multi needs conntrack:
+// the pod's node holds a link per remote programmer, and a static mark rule
+// cannot say which one a reply belongs to. It saves the peer's mark per link on
+// the way in and restores it on the way out.
+func TestMultiServingUsesConntrackReturn(t *testing.T) {
+	res := Compute(multiWorld("node-c"))
+
+	if len(res.State.Mark) != 0 {
+		t.Errorf("Mark = %+v, want none under Multi (a static mark cannot tell peers apart)", res.State.Mark)
+	}
+	if len(res.State.CtSave) != 2 {
+		t.Fatalf("CtSave = %+v, want one per remote programmer (node-a, node-b)", res.State.CtSave)
+	}
+	if len(res.State.CtLoad) != 1 {
+		t.Fatalf("CtLoad = %+v, want one restore rule for the pod's replies", res.State.CtLoad)
+	}
+
+	// Each save names a distinct link and a distinct mark, which is what makes
+	// the reply leave by the link its request arrived on.
+	seenIface := map[string]bool{}
+	seenMark := map[uint32]bool{}
+	for _, c := range res.State.CtSave {
+		if seenIface[c.Iface] {
+			t.Errorf("CtSave repeats interface %s; each peer needs its own link", c.Iface)
+		}
+		if seenMark[c.Mark] {
+			t.Errorf("CtSave repeats mark 0x%x; each peer needs its own slot", c.Mark)
+		}
+		seenIface[c.Iface] = true
+		seenMark[c.Mark] = true
+	}
+
+	if len(res.State.Links) != 2 {
+		t.Errorf("Links = %d, want one per remote programmer", len(res.State.Links))
+	}
+	if len(res.State.Routes) != 2 {
+		t.Errorf("Routes = %d, want one return route per peer", len(res.State.Routes))
+	}
+	// A loop guard and a divert rule per peer.
+	if len(res.State.Rules) != 4 {
+		t.Errorf("Rules = %d, want a loop guard and a divert per peer", len(res.State.Rules))
+	}
+}
+
+// TestSingleServingKeepsStaticMark pins the default: nothing about the
+// conntrack path appears for a class that did not ask for Multi.
+func TestSingleServingKeepsStaticMark(t *testing.T) {
+	res := Compute(remoteWorld("node-b"))
+	if len(res.State.Mark) != 1 {
+		t.Errorf("Mark = %+v, want the one static rule Single has always used", res.State.Mark)
+	}
+	if len(res.State.CtSave) != 0 || len(res.State.CtLoad) != 0 {
+		t.Errorf("CtSave/CtLoad = %+v/%+v, want none under Single", res.State.CtSave, res.State.CtLoad)
+	}
+}
+
+// TestMultiServingPublishesEveryNode: the addresses a client may dial are every
+// programmer's, which is what makes a routed virtual address usable.
+func TestMultiServingPublishesEveryNode(t *testing.T) {
+	res := Compute(multiWorld("node-c"))
+	st, ok := res.PortMapStatus[types.NamespacedName{Namespace: "games", Name: "a"}]
+	if !ok {
+		t.Fatal("no status written for the mapping")
+	}
+	nodes := map[string]bool{}
+	for _, p := range st.Published {
+		nodes[p.Node] = true
+	}
+	for _, want := range []string{"node-a", "node-b", "node-c"} {
+		if !nodes[want] {
+			t.Errorf("published rows = %+v, want one naming %s", st.Published, want)
+		}
+	}
+}

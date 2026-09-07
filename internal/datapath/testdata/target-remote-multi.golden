@@ -1,0 +1,15 @@
+table ip kuport {
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 10; policy accept;
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname != "cilium_*" ip saddr 10.244.18.107 udp sport 3000 counter snat to ip saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+		ip saddr 10.244.18.107 udp sport 3000 counter meta mark set ct mark
+		iifname "kup-da0d9a1d" counter ct mark set 0x6b700001
+		iifname "kup-e5b1c204" counter ct mark set 0x6b700002
+	}
+}

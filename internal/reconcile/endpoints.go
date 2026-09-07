@@ -155,18 +155,33 @@ func decideRole(in Inputs, m *mapping) {
 		return
 	}
 
-	m.remote = m.serving != m.endpoint.node
+	// Under Multi every accepting node forwards the mapping, so a routed
+	// virtual address reaching any of them works. Under Single only S does.
+	// The status owner stays S either way, which keeps one writer per PortMap.
+	if servingModeOf(m.class) == v1alpha1.ServingMulti {
+		m.programmers = append([]string(nil), m.acceptingNodes...)
+	} else {
+		m.programmers = []string{m.serving}
+	}
+
+	m.remote = false
+	for _, p := range m.programmers {
+		if p != m.endpoint.node {
+			m.remote = true
+		}
+	}
 
 	if m.remote && returnPathMode(m.class) == v1alpha1.ReturnPathNone {
-		// Anchored on S: every agent computes the same S and the same
-		// refusal, and no node programs a mapping whose replies cannot
+		// Anchored on S: every agent computes the same programmer set and the
+		// same refusal, and no node programs a mapping whose replies cannot
 		// return.
 		m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
-			"return path is None and the chosen pod is on another node", in.Now)
+			"return path is None and the chosen pod is not on every programming node", in.Now)
+		m.programmers = nil
 		return
 	}
 
-	// S is the sole programming node, local pod or remote.
+	// S owns the status whichever mode is in force.
 	m.effAccepting = m.serving
 
 	// Whether the served mapping reads True is decided against the
@@ -174,6 +189,15 @@ func decideRole(in Inputs, m *mapping) {
 	// allocation; sibling accepting nodes are outside the mapping and gate
 	// nothing there.
 	m.gated = true
+}
+
+// servingModeOf returns a class's serving mode, defaulting to Single so a
+// class written before the field existed keeps one serving node.
+func servingModeOf(class *v1alpha1.PortMapClass) v1alpha1.ServingMode {
+	if class.Spec.ServingMode == v1alpha1.ServingMulti {
+		return v1alpha1.ServingMulti
+	}
+	return v1alpha1.ServingSingle
 }
 
 // returnPathMode returns a class's return-path mode.

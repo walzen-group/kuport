@@ -18,6 +18,8 @@ type dpCase struct {
 	wantDNAT   int // KindDNAT rules
 	wantExempt int // KindSNAT rules
 	wantMark   int // KindMark rules
+	wantCtSave int // KindCtSave rules
+	wantCtLoad int // KindCtLoad rules
 	wantLinks  int
 	wantRules  int
 	wantRoutes int
@@ -72,10 +74,54 @@ func cases() []dpCase {
 		},
 	}
 
+	// target-remote-multi: the same pod under Multi serving, reached from two
+	// accepting nodes. The static mark is gone, replaced by a save rule per
+	// link and one restore rule, which is what lets a reply leave by the link
+	// its request arrived on.
+	secondAccept := netip.MustParseAddr("203.0.113.10")
+	secondCIDR := netip.MustParsePrefix("203.0.113.10/32")
+	targetRemoteMulti := State{
+		Exempt: []ExemptRule{
+			{OifName: "cilium_*", Negate: true, SrcAddr: &src, Port: udp3000, PortIsSrc: true},
+		},
+		CtSave: []CtSaveRule{
+			{Iface: "kup-da0d9a1d", Mark: 0x6b700001},
+			{Iface: "kup-e5b1c204", Mark: 0x6b700002},
+		},
+		CtLoad: []CtLoadRule{
+			{SrcAddr: pod, Port: udp3000},
+		},
+		Links: []Link{
+			{
+				Name: "kup-da0d9a1d", VNI: 4242, Port: 4790,
+				LocalAddr:  netip.MustParseAddr("100.64.0.2"),
+				RemoteAddr: acceptAddr,
+				LinkAddr:   netip.MustParsePrefix("169.254.77.1/31"),
+			},
+			{
+				Name: "kup-e5b1c204", VNI: 4242, Port: 4790,
+				LocalAddr:  netip.MustParseAddr("100.64.0.2"),
+				RemoteAddr: secondAccept,
+				LinkAddr:   netip.MustParsePrefix("169.254.77.3/31"),
+			},
+		},
+		Rules: []IPRule{
+			{Pref: 101, Mark: 0x6b700001, To: &acceptCIDR, Table: 254},
+			{Pref: 102, Mark: 0x6b700001, Table: 200},
+			{Pref: 101, Mark: 0x6b700002, To: &secondCIDR, Table: 254},
+			{Pref: 102, Mark: 0x6b700002, Table: 201},
+		},
+		Routes: []Route{
+			{Table: 200, Via: netip.MustParseAddr("169.254.77.0"), Dev: "kup-da0d9a1d"},
+			{Table: 201, Via: netip.MustParseAddr("169.254.77.2"), Dev: "kup-e5b1c204"},
+		},
+	}
+
 	return []dpCase{
 		{name: "accepting-single-port", state: accepting(udp3000), wantDNAT: 2, wantExempt: 1},
 		{name: "accepting-port-range", state: accepting(udpRange), wantDNAT: 2, wantExempt: 1},
 		{name: "target-remote", state: targetRemote, wantExempt: 1, wantMark: 1, wantLinks: 1, wantRules: 2, wantRoutes: 1},
+		{name: "target-remote-multi", state: targetRemoteMulti, wantExempt: 1, wantCtSave: 2, wantCtLoad: 1, wantLinks: 2, wantRules: 4, wantRoutes: 2},
 		// same-node: pod is on the accepting node, so DNAT straight to it with
 		// no return-path machinery. A packet is DNATed once per hook, so this is
 		// a real correctness check, not filler.
@@ -108,6 +154,12 @@ func TestRenderShape(t *testing.T) {
 			}
 			if got := countKind(p.Rules, KindMark); got != c.wantMark {
 				t.Errorf("mark rules = %d, want %d", got, c.wantMark)
+			}
+			if got := countKind(p.Rules, KindCtSave); got != c.wantCtSave {
+				t.Errorf("ct save rules = %d, want %d", got, c.wantCtSave)
+			}
+			if got := countKind(p.Rules, KindCtLoad); got != c.wantCtLoad {
+				t.Errorf("ct load rules = %d, want %d", got, c.wantCtLoad)
 			}
 			if got := len(p.Links); got != c.wantLinks {
 				t.Errorf("links = %d, want %d", got, c.wantLinks)

@@ -16,6 +16,11 @@ type PortMapClassSpec struct {
 	// +kubebuilder:validation:MinProperties=1
 	Nodes map[string]NodeInterfaces `json:"nodes"`
 
+	// How many of the class's accepting nodes program a mapping.
+	// +kubebuilder:default=Single
+	// +optional
+	ServingMode ServingMode `json:"servingMode,omitempty"`
+
 	// +optional
 	Ports *PortRange `json:"ports,omitempty"`
 
@@ -26,6 +31,25 @@ type PortMapClassSpec struct {
 	// +kubebuilder:validation:Required
 	ReturnPath ReturnPath `json:"returnPath"`
 }
+
+// ServingMode is how many of a class's accepting nodes program a mapping.
+//
+// Single is one node: the node holding the chosen pod when it accepts the
+// class, otherwise the first accepting node by name. The port answers on that
+// node alone, and the address moves when the serving node changes.
+//
+// Multi is every accepting node. The port answers on all of them at once, so a
+// routed virtual address that reaches any of them works. The pod's node then
+// has one return link per remote accepting node and tells them apart through
+// the flow's conntrack entry, which is what the class README calls out as the
+// mode's one dependency.
+// +kubebuilder:validation:Enum=Single;Multi
+type ServingMode string
+
+const (
+	ServingSingle ServingMode = "Single"
+	ServingMulti  ServingMode = "Multi"
+)
 
 // NodeInterfaces is one accepting node's interface list.
 type NodeInterfaces struct {

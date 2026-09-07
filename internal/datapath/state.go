@@ -9,6 +9,8 @@ type State struct {
 	DNAT   []DNATRule
 	Exempt []ExemptRule
 	Mark   []MarkRule
+	CtSave []CtSaveRule
+	CtLoad []CtLoadRule
 	Links  []Link
 	Rules  []IPRule
 	Routes []Route
@@ -46,6 +48,26 @@ type MarkRule struct {
 	SrcAddr netip.Addr
 	Port    PortSel // matched as source port
 	Mark    uint32
+}
+
+// CtSaveRule runs on a target node under Multi serving. A request arriving on
+// one accepting node's link writes that peer's mark into the flow's conntrack
+// entry, which is the only record of which node forwarded it. It sets ct mark
+// directly and leaves the packet's own mark alone: a marked request would match
+// the divert rule and be routed straight back out the link it came in on.
+type CtSaveRule struct {
+	Iface string
+	Mark  uint32
+}
+
+// CtLoadRule runs on a target node under Multi serving, restoring the mark
+// CtSaveRule stored so the reply routes back over the link its request arrived
+// on. It replaces the static MarkRule, which cannot tell peers apart. A flow
+// with no conntrack entry restores 0, matches no divert rule, and leaves by
+// this node's own uplink; the next inbound packet writes the mark again.
+type CtLoadRule struct {
+	SrcAddr netip.Addr
+	Port    PortSel // matched as source port
 }
 
 // Link is one point-to-point VXLAN to a peer node.

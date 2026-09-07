@@ -184,6 +184,13 @@ spec:
                 required:
                 - mode
                 type: object
+              servingMode:
+                default: Single
+                description: How many of the class's accepting nodes program a mapping.
+                enum:
+                - Single
+                - Multi
+                type: string
             required:
             - nodes
             - returnPath

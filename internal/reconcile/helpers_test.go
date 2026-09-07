@@ -96,6 +96,12 @@ func withMode(mode v1alpha1.ReturnPathMode) classOpt {
 	return func(c *v1alpha1.PortMapClass) { c.Spec.ReturnPath.Mode = mode }
 }
 
+// withMultiServing puts the class in Multi serving, where every accepting node
+// programs the mapping.
+func withMultiServing() classOpt {
+	return func(c *v1alpha1.PortMapClass) { c.Spec.ServingMode = v1alpha1.ServingMulti }
+}
+
 func withSubnet(cidr string) classOpt {
 	return func(c *v1alpha1.PortMapClass) {
 		if c.Spec.ReturnPath.Vxlan == nil {

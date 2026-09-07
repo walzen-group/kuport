@@ -30,6 +30,11 @@ kind: PortMapClass
 metadata:
   name: intranet
 spec:
+  # Multi: every node listed here carries the DNAT rules, so a client reaching
+  # any of them is served. That is what a routed virtual address needs, since
+  # the mesh may land a client on any worker. The pod's node tells the peers
+  # apart through the flow's conntrack entry; see docs/spec.md.
+  servingMode: Multi
   nodes:
     worker-1:
       interfaces:
@@ -40,4 +45,4 @@ spec:
         - wt0
         - eth0
   returnPath:
-    mode: None
+    mode: Vxlan

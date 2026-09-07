@@ -72,12 +72,17 @@ func nftExprs(r Rule) []expr.Any {
 		e = append(e, ipCmp(*r.DstAddr, ipDstOffset)...)
 	}
 
-	// Match the L4 protocol, then the port (source or destination).
-	e = append(e,
-		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{protoNum(r.Port.Proto)}},
-	)
-	e = append(e, portMatch(r.Port, r.PortIsSrc)...)
+	// Match the L4 protocol, then the port (source or destination). A rule with
+	// no protocol matches every flow arriving on its interface, which is what
+	// the conntrack save rule wants: the link carries one mapping's traffic and
+	// nothing else, so the peer it names is the whole match.
+	if r.Port.Proto != "" {
+		e = append(e,
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{protoNum(r.Port.Proto)}},
+		)
+		e = append(e, portMatch(r.Port, r.PortIsSrc)...)
+	}
 
 	e = append(e, &expr.Counter{})
 
@@ -88,6 +93,10 @@ func nftExprs(r Rule) []expr.Any {
 		e = append(e, snatIdentityExprs()...)
 	case KindMark:
 		e = append(e, markExprs(r.Mark)...)
+	case KindCtSave:
+		e = append(e, ctSaveExprs(r.Mark)...)
+	case KindCtLoad:
+		e = append(e, ctLoadExprs()...)
 	}
 	return e
 }
@@ -209,6 +218,26 @@ func snatIdentityExprs() []expr.Any {
 func markExprs(mark uint32) []expr.Any {
 	return []expr.Any{
 		&expr.Immediate{Register: 1, Data: binaryutil.NativeEndian.PutUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1},
+	}
+}
+
+// ctSaveExprs writes a peer's mark straight into the flow's conntrack entry.
+// It sets ct mark without touching meta mark, so the request keeps travelling
+// to the pod rather than matching the divert rule on its way in.
+func ctSaveExprs(mark uint32) []expr.Any {
+	return []expr.Any{
+		&expr.Immediate{Register: 1, Data: binaryutil.NativeEndian.PutUint32(mark)},
+		&expr.Ct{Key: expr.CtKeyMARK, SourceRegister: true, Register: 1},
+	}
+}
+
+// ctLoadExprs copies the flow's stored ct mark onto the packet, which is what
+// the divert rule reads. A flow with no entry yields 0 and leaves by this
+// node's own uplink.
+func ctLoadExprs() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeyMARK, Register: 1},
 		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1},
 	}
 }

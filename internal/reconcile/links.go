@@ -44,8 +44,10 @@ type classAlloc struct {
 }
 
 // neededPairsByClass groups the return-link pairs every accepted mapping needs,
-// keyed by class name. A pair is needed when a mapping's forwarding node and its
-// chosen endpoint sit on different nodes.
+// keyed by class name. A pair is needed for each programming node that sits off
+// the chosen endpoint's node. Under Single that is at most one pair; under
+// Multi it is one per accepting node that lacks the pod, since each of them
+// forwards and each needs its own way back.
 func neededPairsByClass(mappings []*mapping) map[string]map[string]neededPair {
 	out := map[string]map[string]neededPair{}
 	for _, m := range mappings {
@@ -53,18 +55,20 @@ func neededPairsByClass(mappings []*mapping) map[string]map[string]neededPair {
 			continue
 		}
 		cls := m.pm.Spec.ClassName
-		key := pairKey(m.effAccepting, m.endpoint.node)
-		byKey := out[cls]
-		if byKey == nil {
-			byKey = map[string]neededPair{}
-			out[cls] = byKey
+		for _, peer := range remoteProgrammers(m, m.endpoint.node) {
+			key := pairKey(peer, m.endpoint.node)
+			byKey := out[cls]
+			if byKey == nil {
+				byKey = map[string]neededPair{}
+				out[cls] = byKey
+			}
+			p, ok := byKey[key]
+			if !ok {
+				p = neededPair{key: key, peers: sortedPair(peer, m.endpoint.node), holders: map[string]bool{}}
+			}
+			p.holders[m.endpoint.node] = true
+			byKey[key] = p
 		}
-		p, ok := byKey[key]
-		if !ok {
-			p = neededPair{key: key, peers: sortedPair(m.effAccepting, m.endpoint.node), holders: map[string]bool{}}
-		}
-		p.holders[m.endpoint.node] = true
-		byKey[key] = p
 	}
 	return out
 }
@@ -121,7 +125,14 @@ func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) c
 // them against a tentative allocation lets a lost claim race mark packets
 // with a slot another pair already holds.
 func (a classAlloc) landedSlot(m *mapping) (int, bool) {
-	key := pairKey(m.effAccepting, m.endpoint.node)
+	return a.landedSlotFor(m, m.effAccepting)
+}
+
+// landedSlotFor is landedSlot for one named peer, which is what Multi serving
+// needs: the pod's node holds a link per remote programmer, each on its own
+// slot, so a reply can leave by the link its request arrived on.
+func (a classAlloc) landedSlotFor(m *mapping, peer string) (int, bool) {
+	key := pairKey(peer, m.endpoint.node)
 	la, ok := a.existing[key]
 	return int(la.Slot), ok
 }

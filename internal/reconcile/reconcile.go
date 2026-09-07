@@ -104,9 +104,16 @@ type mapping struct {
 	// effAccepting is the node that actually forwards this mapping: serving
 	// when the mapping is programmed anywhere, "" when no node may program
 	// it (no endpoint, no accepting node, or the None-return-path refusal).
-	// With several accepting nodes it equals serving: one node serves.
+	// Under Single serving it is the only programmer; under Multi it stays the
+	// status owner while programmers carries every node that forwards.
 	effAccepting string
-	// remote is true when effAccepting must reach the pod across a return link.
+	// programmers is every node that writes this mapping's DNAT rules: just
+	// effAccepting under Single, every accepting node under Multi. Empty when
+	// no node may program the mapping. Sorted, so emission is deterministic.
+	programmers []string
+	// remote is true when a programmer must reach the pod across a return link.
+	// Under Multi it is true when any programmer is off the pod's node, which
+	// is what decides whether the class's return path has to exist at all.
 	remote bool
 	// gated marks the accepted, served mapping whose final Programmed
 	// condition resolveProgrammed settles after the slot allocation is
@@ -206,9 +213,11 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 	}
 	sel := portSel(m.pm)
 
-	// Accepting side: DNAT per interface plus the masquerade exemption.
-	if this == m.effAccepting {
-		for _, iface := range interfacesFor(m.class, m.effAccepting, m.pm) {
+	// Accepting side: DNAT per interface plus the masquerade exemption, on
+	// every programmer. Under Single that is one node; under Multi it is every
+	// accepting node, so the port answers wherever a routed address lands.
+	if contains(m.programmers, this) {
+		for _, iface := range interfacesFor(m.class, this, m.pm) {
 			st.DNAT = append(st.DNAT, datapath.DNATRule{
 				Iface:  iface,
 				Port:   sel,
@@ -226,8 +235,8 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 		// A remote pod needs the return-link device on this end, and only
 		// once the claim has landed: a tentative slot must not half-build a
 		// link whose mark could collide.
-		if m.remote {
-			if slot, ok := alloc.landedSlot(m); ok {
+		if this != endpointNode {
+			if slot, ok := alloc.landedSlotFor(m, this); ok {
 				if lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, endpointNode, slot); ok {
 					st.Links = append(st.Links, linkDevice(lp))
 				}
@@ -235,8 +244,11 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 		}
 	}
 
-	// Target side: this node holds the pod and the accepting node is elsewhere.
-	if this == endpointNode && m.effAccepting != this {
+	// Target side: this node holds the pod and at least one programmer is
+	// elsewhere. Each remote programmer gets its own link, slot and routing
+	// table, because a reply has to leave by the link its request arrived on.
+	remotePeers := remoteProgrammers(m, this)
+	if this == endpointNode && len(remotePeers) > 0 {
 		src := addr
 		st.Exempt = append(st.Exempt, datapath.ExemptRule{
 			OifName:   "cilium_*",
@@ -245,23 +257,61 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			Port:      sel,
 			PortIsSrc: true,
 		})
-		// The mark carries the slot, so nothing that depends on the slot is
-		// written until the claim has landed: an unresolved slot must never
-		// become a real mark, and the divert rules and link that share the
-		// slot appear with it, atomically per pass.
-		if slot, ok := alloc.landedSlot(m); ok {
-			if lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, m.effAccepting, slot); ok {
+
+		multi := servingModeOf(m.class) == v1alpha1.ServingMulti
+		if multi {
+			// One rule for every peer: the reply carries whichever mark its
+			// request stored, and a flow with no entry restores 0 and leaves
+			// by this node's own uplink.
+			st.CtLoad = append(st.CtLoad, datapath.CtLoadRule{SrcAddr: src, Port: sel})
+		}
+
+		for _, peer := range remotePeers {
+			// The mark carries the slot, so nothing that depends on the slot is
+			// written until the claim has landed: an unresolved slot must never
+			// become a real mark, and the divert rules and link that share the
+			// slot appear with it, atomically per pass.
+			slot, ok := alloc.landedSlotFor(m, peer)
+			if !ok {
+				continue
+			}
+			lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, peer, slot)
+			if !ok {
+				continue
+			}
+			if multi {
+				// Which peer forwarded a request is known only as it arrives,
+				// so it is written into the flow rather than derived from the
+				// packet, which carries nothing that says which.
+				st.CtSave = append(st.CtSave, datapath.CtSaveRule{
+					Iface: lp.name,
+					Mark:  lp.mark,
+				})
+			} else {
 				st.Mark = append(st.Mark, datapath.MarkRule{
 					SrcAddr: src,
 					Port:    sel,
 					Mark:    lp.mark,
 				})
-				st.Links = append(st.Links, linkDevice(lp))
-				st.Rules = append(st.Rules, loopGuardRule(lp), divertRule(lp))
-				st.Routes = append(st.Routes, returnRoute(lp))
 			}
+			st.Links = append(st.Links, linkDevice(lp))
+			st.Rules = append(st.Rules, loopGuardRule(lp), divertRule(lp))
+			st.Routes = append(st.Routes, returnRoute(lp))
 		}
 	}
+}
+
+// remoteProgrammers returns, sorted, the mapping's programmers that are not the
+// given node. On the pod's node that is every peer needing a return link.
+func remoteProgrammers(m *mapping, this string) []string {
+	var out []string
+	for _, p := range m.programmers {
+		if p != this {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolveProgrammed settles the Programmed condition for the mappings
@@ -293,16 +343,27 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 		}
 		if m.remote {
 			a := alloc[m.pm.Spec.ClassName]
-			slot, ok := a.landedSlot(m)
-			if !ok {
-				m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
-					fmt.Sprintf("return link for %s is not claimed yet",
-						pairKey(m.effAccepting, m.endpoint.node)), in.Now)
-				continue
+			// Every programmer off the pod's node needs its own landed slot
+			// and a buildable link. Under Single there is one; under Multi the
+			// mapping is not fully programmed until the last of them is.
+			stalled := false
+			for _, peer := range remoteProgrammers(m, m.endpoint.node) {
+				slot, ok := a.landedSlotFor(m, peer)
+				if !ok {
+					m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
+						fmt.Sprintf("return link for %s is not claimed yet",
+							pairKey(peer, m.endpoint.node)), in.Now)
+					stalled = true
+					break
+				}
+				if _, ok := buildLinkParams(idx, m.class, a.subnet, peer, m.endpoint.node, slot); !ok {
+					m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
+						fmt.Sprintf("node %s on the return path has no usable address", peer), in.Now)
+					stalled = true
+					break
+				}
 			}
-			if _, ok := buildLinkParams(idx, m.class, a.subnet, m.effAccepting, m.endpoint.node, slot); !ok {
-				m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
-					"a node on the return path has no usable address", in.Now)
+			if stalled {
 				continue
 			}
 		}

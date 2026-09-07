@@ -116,6 +116,7 @@ spec:
 | --- | --- | --- |
 | nodes | map of node name to object | Nodes that may accept traffic for this class: its accepting nodes. Each mapping the class admits is programmed on exactly one of them, its serving node. A name with no Node object in the cluster is skipped. Required, at least one entry. |
 | nodes.&lt;name&gt;.interfaces | list of string | Interface names that node's DNAT rules match on. One rule per interface, on the mapping's serving node. Naming them per node lets one class cover nodes whose NICs are named differently. Required, at least one. |
+| servingMode | enum | `Single` or `Multi`: how many accepting nodes program a mapping. Default `Single`. See below. |
 | ports.min, ports.max | int | The range a PortMap may ask for. Defaults 1, 65535. |
 | ports.reserved | list of int | Ports the admin keeps back. A PortMap naming one is rejected in status. |
 | namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
@@ -529,7 +530,27 @@ This depends on netfilter's once-per-hook behaviour and on kuport's chain
 sorting first, rather than on the text of any Cilium rule, so a Cilium upgrade
 that rewords its masquerade rules does not break it.
 
-### Target node, when it is not the serving node
+### Target node, when it is not a programming node
+
+Under `Single` this is the one serving node's peer. Under `Multi` the same
+objects exist once per accepting node that lacks the pod, each on its own slot,
+link, table and mark, and the mangle chain carries the conntrack pair described
+under servingMode instead of the static mark rule:
+
+```
+chain kup-mangle {
+  ip saddr <pod ip> <proto> sport <port> counter meta mark set ct mark
+  iifname "kup-<peer a>" counter ct mark set <peer a mark>
+  iifname "kup-<peer b>" counter ct mark set <peer b mark>
+}
+```
+
+The rules match disjointly and neither issues a verdict, so their order does not
+matter: a request arriving on a link carries the client's source address and
+never matches the restore rule, and a reply from the pod arrives on its veth and
+never matches a save rule.
+
+### Target node, Single serving
 
 ```
 table ip kuport {
@@ -684,15 +705,66 @@ them, and the next start reconciles them away.
 | the CNI is known not to tunnel (Vxlan classes) | report `Ready=False` with `TunnelModeRequired` on the class; the rules are still programmed, so a native-routing cluster shows green mappings whose cross-node traffic dies in the mesh. A mode that cannot be read (no cilium-config) is reported as unknown and refuses nothing |
 | return link port collides with the CNI's | report `Ready=False` with `VxlanPortConflict` on the class |
 
-A class that selects several nodes refuses nothing: each mapping has exactly
-one serving node. Two accepting nodes forwarding to one remote pod would need
-that pod's node to send each reply back to whichever node forwarded it, and
-the reply carries nothing that says which. Making that work needs a distinct
-port per accepting node and a return rule matching source port. The choice and
-the serving node are computed once, from shared inputs, so every other
-accepting node stays outside the mapping: no rules, no status, and no
-refusal. When the first accepting node loses its candidate the mapping fails
-over to the next one.
+A class that selects several nodes refuses nothing. How many of them forward a
+mapping is `servingMode`, and the choice and the serving node are computed once
+from shared inputs either way. When the first accepting node loses its candidate
+the mapping fails over to the next one.
+
+### servingMode
+
+| | `Single`, the default | `Multi` |
+| --- | --- | --- |
+| Nodes with DNAT rules | the serving node alone | every accepting node |
+| Address a client dials | the serving node's, which moves when the pod moves | any accepting node's, so a routed virtual address works |
+| Return links on the pod's node | at most one | one per accepting node that lacks the pod |
+| Return path mechanism | a static mark rule | the flow's conntrack entry |
+| Status writer | the serving node | the serving node, unchanged |
+
+Under `Single` every other accepting node stays outside the mapping: no rules,
+no status, no refusal.
+
+`Multi` exists because a routed virtual address may land on any of the class's
+nodes, and a client reaching a node with no rules gets nothing. Two accepting
+nodes forwarding to one remote pod need that pod's node to send each reply back
+to whichever node forwarded it, and the reply carries nothing that says which:
+the client address does not determine the path, because which node a client
+reaches is the mesh's routing choice and free to change. So the pod's node
+records the answer as the request arrives, in the only place that spans a
+request and its reply.
+
+```
+request in on kup-<peer>   ->  ct mark set <peer mark>     (meta mark untouched,
+                                                            so the request is not
+                                                            diverted on its way in)
+reply from the pod         ->  meta mark set ct mark       (then pref 101/102 as
+                                                            under Single)
+```
+
+A flow with no conntrack entry restores mark 0, matches no divert rule, and
+leaves by the node's own uplink. The next inbound packet writes the mark again,
+because the save rule matches the arrival interface rather than any stored
+state, so a flow heals itself as soon as the client speaks.
+
+### What Multi depends on
+
+The mark lives as long as the conntrack entry, which is a limitation to size
+rather than a corner case:
+
+| Protocol | Sysctl | Linux default |
+| --- | --- | --- |
+| TCP, established | `nf_conntrack_tcp_timeout_established` | 432000s, 5 days |
+| UDP, one direction seen | `nf_conntrack_udp_timeout` | 30s |
+| UDP, both directions seen | `nf_conntrack_udp_timeout_stream` | 120s |
+
+A flow idle past its timeout recovers on the next packet from the client. A
+packet the pod sends first in that window is lost, and for a workload that
+pushes to an idle client the loss continues until the client speaks. Request and
+response traffic is unaffected, since the client always goes first.
+
+`Single` carries the same shape of dependency already: the accepting node's DNAT
+is conntrack-based, so a reply after the entry ages out is not translated back
+and the client discards it. `Multi` extends that dependency to the pod's node
+rather than introducing a new kind of failure.
 
 ## Repo layout
 

@@ -295,6 +295,7 @@ Which fields are decisions and which are defaults:
 
 | Field | Decision or default | Notes |
 | --- | --- | --- |
+| servingMode | default Single | `Multi` puts the rules on every accepting node, which is what a routed virtual address needs. It costs a return link per accepting node without the pod and depends on conntrack; see docs/spec.md |
 | nodes | decision | must be written; every accepting node by name |
 | nodes.&lt;name&gt;.interfaces | decision | must be written; the names that exist on that node, so nodes with different NIC names belong to one class |
 | ports | default 1..65535 | worth narrowing on a public class |

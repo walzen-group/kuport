@@ -49,11 +49,13 @@ func nftText(r Rule) string {
 		fmt.Fprintf(&b, "ip daddr %s ", r.DstAddr.String())
 	}
 
-	sel := "dport"
-	if r.PortIsSrc {
-		sel = "sport"
+	if r.Port.Proto != "" {
+		sel := "dport"
+		if r.PortIsSrc {
+			sel = "sport"
+		}
+		fmt.Fprintf(&b, "%s %s %s ", r.Port.Proto, sel, portText(r.Port))
 	}
-	fmt.Fprintf(&b, "%s %s %s ", r.Port.Proto, sel, portText(r.Port))
 
 	switch r.Kind {
 	case KindDNAT:
@@ -62,6 +64,10 @@ func nftText(r Rule) string {
 		b.WriteString("counter snat to ip saddr")
 	case KindMark:
 		fmt.Fprintf(&b, "counter meta mark set 0x%x", r.Mark)
+	case KindCtSave:
+		fmt.Fprintf(&b, "counter ct mark set 0x%x", r.Mark)
+	case KindCtLoad:
+		b.WriteString("counter meta mark set ct mark")
 	}
 	return b.String()
 }

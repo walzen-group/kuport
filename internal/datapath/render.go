@@ -34,6 +34,15 @@ const (
 	KindSNAT
 	// KindMark sets an fwmark so replies route back through the accepting node.
 	KindMark
+	// KindCtSave writes a peer's mark into the flow's conntrack entry, on the
+	// request. It sets ct mark alone, leaving the packet's own mark clear, so
+	// the request is not caught by the divert rule and sent back out the link
+	// it arrived on.
+	KindCtSave
+	// KindCtLoad restores that mark onto the reply, so it leaves by the link
+	// its request arrived on. Under Multi serving it replaces KindMark, which
+	// carries one peer's mark and so cannot tell several accepting nodes apart.
+	KindCtLoad
 )
 
 // Rule is one nftables rule described by semantic fields rather than by
@@ -115,6 +124,29 @@ func Render(s State) Plan {
 			Port:      m.Port,
 			PortIsSrc: true,
 			Mark:      m.Mark,
+		})
+	}
+	// Save and load rules match disjointly and neither issues a verdict, so
+	// their order in the chain does not matter. A request arriving on a link
+	// carries the client's source address, so it never matches the load rule;
+	// a reply from the pod arrives on its veth, so it never matches a save
+	// rule. sortRules puts them in interface order like everything else.
+	for _, c := range s.CtSave {
+		rules = append(rules, Rule{
+			Chain:   ChainMangle,
+			Kind:    KindCtSave,
+			IifName: c.Iface,
+			Mark:    c.Mark,
+		})
+	}
+	for _, c := range s.CtLoad {
+		src := c.SrcAddr
+		rules = append(rules, Rule{
+			Chain:     ChainMangle,
+			Kind:      KindCtLoad,
+			SrcAddr:   &src,
+			Port:      c.Port,
+			PortIsSrc: true,
 		})
 	}
 

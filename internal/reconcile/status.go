@@ -204,14 +204,21 @@ func publishedRows(m *mapping) []v1alpha1.PublishedAddress {
 		return nil
 	}
 	var rows []v1alpha1.PublishedAddress
-	for _, iface := range interfacesFor(m.class, m.serving, m.pm) {
-		rows = append(rows, v1alpha1.PublishedAddress{
-			Node:      m.serving,
-			Interface: iface,
-			Address:   "",
-		})
+	for _, node := range m.programmers {
+		for _, iface := range interfacesFor(m.class, node, m.pm) {
+			rows = append(rows, v1alpha1.PublishedAddress{
+				Node:      node,
+				Interface: iface,
+				Address:   "",
+			})
+		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Interface < rows[j].Interface })
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Node != rows[j].Node {
+			return rows[i].Node < rows[j].Node
+		}
+		return rows[i].Interface < rows[j].Interface
+	})
 	return rows
 }
 
