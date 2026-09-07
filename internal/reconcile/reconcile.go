@@ -280,6 +280,17 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 			m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNodeNotReady, msg, in.Now)
 			continue
 		}
+		// The mapping's interfaces are allowed to name interfaces only some of
+		// the class's nodes carry, so the set can come out empty on the node
+		// that ended up serving. The port would then answer nowhere, which is
+		// worth saying rather than programming nothing in silence.
+		if len(interfacesFor(m.class, m.serving, m.pm)) == 0 {
+			m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonNoInterfaceOnNode,
+				fmt.Sprintf("none of the requested interfaces (%s) are on serving node %s, which class %q gives %s",
+					strings.Join(m.pm.Spec.Interfaces, ", "), m.serving, m.class.Name,
+					strings.Join(classInterfacesOn(m.class, m.serving), ", ")), in.Now)
+			continue
+		}
 		if m.remote {
 			a := alloc[m.pm.Spec.ClassName]
 			slot, ok := a.landedSlot(m)

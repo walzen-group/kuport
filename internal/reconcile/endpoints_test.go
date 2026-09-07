@@ -143,6 +143,50 @@ func TestInterfaceNotInClass(t *testing.T) {
 	})
 }
 
+// TestNoInterfaceOnServingNode covers the gap between the two checks: a name
+// the class carries on one node and not on the node that ends up serving. The
+// mapping is admitted, programs nothing there, and has to say so.
+func TestNoInterfaceOnServingNode(t *testing.T) {
+	in := Inputs{
+		NodeName: "node-b",
+		Nodes: []*corev1.Node{
+			node("node-a", "10.0.0.1", nil),
+			node("node-b", "10.0.0.2", nil),
+		},
+		Namespaces: []*corev1.Namespace{ns("games", nil)},
+		// node-b reports a ready row, so the NodeNotReady gate passes and what
+		// fails is the mapping's own choice of interface.
+		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
+			withNodeInterfaces("node-a", "wt0", "enp1s0"),
+			withNodeInterfaces("node-b", "wt0", "eth0"),
+			withNodeRows(v1alpha1.NodeStatus{Name: "node-b", Ready: true}))},
+		// enp1s0 is on node-a alone, so it passes the class check and leaves
+		// node-b, the serving node, with nothing to bind.
+		PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0, withPMInterfaces("enp1s0"))},
+		Slices: []*discoveryv1.EndpointSlice{
+			slice("games", "a", endpointSpec{addr: "10.244.0.5", node: "node-b", target: "pod-a"}),
+		},
+		Now: metav1.NewTime(baseTime),
+	}
+
+	res := Compute(in)
+	if c := acceptedOf(res, "games", "a"); c.Status != metav1.ConditionTrue {
+		t.Fatalf("Accepted = %s/%s, want True (enp1s0 is on a node of the class)", c.Status, c.Reason)
+	}
+	c := programmedOf(res, "games", "a")
+	if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonNoInterfaceOnNode {
+		t.Fatalf("Programmed = %s/%s, want False/NoInterfaceOnNode", c.Status, c.Reason)
+	}
+	for _, want := range []string{"enp1s0", "node-b", "wt0", "eth0"} {
+		if !strings.Contains(c.Message, want) {
+			t.Errorf("message = %q, want it to name %s", c.Message, want)
+		}
+	}
+	if len(res.State.DNAT) != 0 {
+		t.Errorf("DNAT = %+v, want none", res.State.DNAT)
+	}
+}
+
 func TestClassSelection(t *testing.T) {
 	twoNodes := []*corev1.Node{
 		node("node-a", "10.0.0.1", map[string]string{"edge": "true"}),

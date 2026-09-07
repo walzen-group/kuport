@@ -43,6 +43,7 @@ const (
 	ReasonNoReadyEndpoint       = "NoReadyEndpoint"
 	ReasonReturnPathUnavailable = "ReturnPathUnavailable"
 	ReasonNodeNotReady          = "NodeNotReady"
+	ReasonNoInterfaceOnNode     = "NoInterfaceOnNode"
 )
 
 // PortMapClass Ready=False reasons.

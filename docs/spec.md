@@ -170,10 +170,21 @@ worker-1 wt0 and enp1s0, and worker-2 wt0 and eth0:
 | enp1s0 | enp1s0 | nothing |
 
 Asking for wt0 alone keeps a mapping on the overlay. Asking for the LAN
-interfaces as well as wt0 reaches clients on both. A name no node in the class
-carries is rejected with reason InterfaceNotInClass, which is what catches a
-typo; a name some node carries is accepted, since binding on a subset of the
-nodes is the point of the field.
+interfaces as well as wt0 reaches clients on both.
+
+An interface name that goes nowhere is reported, in one of three places
+depending on where the mistake is:
+
+| Mistake | Reported as | Where |
+| --- | --- | --- |
+| The mapping names an interface no node in the class carries | Accepted=False, InterfaceNotInClass | the PortMap |
+| The mapping names interfaces the class carries, none of them on the node that ended up serving | Programmed=False, NoInterfaceOnNode | the PortMap |
+| The class gives a node an interface the host does not have | the node row is not ready, `interface eth0 not present` | the PortMapClass, and as Programmed=False, NodeNotReady on each mapping it serves |
+
+A name some node carries is accepted, since binding on a subset of the nodes is
+the point of the field. The second row is what catches the case that gets
+through: a mapping admitted by the class check whose serving node has none of
+the names it asked for, which would otherwise program nothing in silence.
 
 The immutable fields are immutable because changing them is indistinguishable
 from deleting one mapping and creating another, and the reconcile is simpler if
