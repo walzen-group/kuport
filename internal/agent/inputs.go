@@ -52,15 +52,17 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	return in, nil
 }
 
-// resolveInterfaces reads every interface any class selects off the host,
-// each one once, for the snapshot Compute turns into class node rows. An
-// interface the host cannot resolve is absent from the map; Compute reports
-// it as a not-ready row naming it, never as a skipped row.
+// resolveInterfaces reads the interfaces the classes give this node off the
+// host, each one once, for the snapshot Compute turns into class node rows.
+// Interfaces a class gives other nodes are never read here, so a class naming
+// eth0 on one node and enp1s0 on another leaves each node reading only its
+// own. An interface the host cannot resolve is absent from the map; Compute
+// reports it as a not-ready row naming it, never as a skipped row.
 func (r *Reconciler) resolveInterfaces(classes []*v1alpha1.PortMapClass) map[string]string {
 	var out map[string]string
 	seen := map[string]bool{}
 	for _, c := range classes {
-		for _, iface := range c.Spec.Interfaces {
+		for _, iface := range c.Spec.Nodes[r.NodeName].Interfaces {
 			if seen[iface] {
 				continue
 			}

@@ -1,16 +1,15 @@
-# PortMapClass "public": one edge node by label serves the open internet.
+# PortMapClass "public": one edge node serves the open internet.
 # Namespaces must carry kuport.wlz.li/public=allowed to reference it.
 apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: public
 spec:
-  nodeSelector:
-    matchLabels:
-      kuport.wlz.li/edge: "true"
-  interfaces:
-    - enp1s0
-    - wt0
+  nodes:
+    worker-1:
+      interfaces:
+        - enp1s0
+        - wt0
   ports:
     min: 1024
     max: 65535
@@ -21,19 +20,24 @@ spec:
   returnPath:
     mode: Vxlan
 ---
-# PortMapClass "intranet": every worker accepts, and any namespace may ask.
+# PortMapClass "intranet": both workers accept, and any namespace may ask.
+# Each node names its own NICs, so one class covers a worker whose LAN
+# interface is enp1s0 and one whose is eth0. A PortMap asking for
+# [wt0, enp1s0, eth0] binds wt0 on both, enp1s0 on worker-1, eth0 on worker-2.
 # returnPath.mode None: a DaemonSet workload has a pod on every accepting node.
 apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:
   name: intranet
 spec:
-  nodeSelector:
-    matchExpressions:
-      - key: node-role.kubernetes.io/control-plane
-        operator: DoesNotExist
-  interfaces:
-    - wt0
-    - enp1s0
+  nodes:
+    worker-1:
+      interfaces:
+        - wt0
+        - enp1s0
+    worker-2:
+      interfaces:
+        - wt0
+        - eth0
   returnPath:
     mode: None

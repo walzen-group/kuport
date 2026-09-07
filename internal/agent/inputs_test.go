@@ -60,15 +60,17 @@ func TestBuildInputs(t *testing.T) {
 }
 
 // TestBuildInputsResolvesInterfaces covers the F2 host self-check seam:
-// buildInputs reads the union of the classes' interfaces off the host once
-// per name, and an interface the host cannot resolve is absent so Compute
+// buildInputs reads the interfaces the classes give this node off the host
+// once per name, and an interface the host cannot resolve is absent so Compute
 // turns it into a not-ready row message rather than a skipped row.
 func TestBuildInputsResolvesInterfaces(t *testing.T) {
 	scheme := testScheme(t)
 	classWith := func(name string, ifaces ...string) *v1alpha1.PortMapClass {
 		return &v1alpha1.PortMapClass{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       v1alpha1.PortMapClassSpec{Interfaces: ifaces},
+			Spec: v1alpha1.PortMapClassSpec{
+				Nodes: map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: ifaces}},
+			},
 		}
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(

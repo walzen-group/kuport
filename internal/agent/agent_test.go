@@ -21,9 +21,8 @@ func TestReconcileEndToEnd(t *testing.T) {
 	cls := &v1alpha1.PortMapClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "public"},
 		Spec: v1alpha1.PortMapClassSpec{
-			NodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "edge"}},
-			Interfaces:   []string{"eth0"},
-			ReturnPath:   v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
+			Nodes:      map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: []string{"eth0"}}},
+			ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).

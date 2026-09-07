@@ -21,7 +21,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
@@ -209,7 +208,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 
 	// Accepting side: DNAT per interface plus the masquerade exemption.
 	if this == m.effAccepting {
-		for _, iface := range interfacesOf(m.class) {
+		for _, iface := range interfacesFor(m.class, m.effAccepting, m.pm) {
 			st.DNAT = append(st.DNAT, datapath.DNATRule{
 				Iface:  iface,
 				Port:   sel,
@@ -448,15 +447,13 @@ func addrPtrKey(a *netip.Addr) string {
 	return a.String()
 }
 
-// acceptingNodesFor returns, sorted by name, the nodes a class selects.
+// acceptingNodesFor returns, sorted by name, the nodes a class names that the
+// cluster still has. A name in the class with no Node object is left out, so a
+// node removed from the cluster stops accepting without the class being edited.
 func (idx *index) acceptingNodesFor(class *v1alpha1.PortMapClass) []string {
-	sel, err := metav1.LabelSelectorAsSelector(&class.Spec.NodeSelector)
-	if err != nil {
-		return nil
-	}
 	var out []string
-	for name, n := range idx.nodesByName {
-		if sel.Matches(labels.Set(n.Labels)) {
+	for name := range class.Spec.Nodes {
+		if _, ok := idx.nodesByName[name]; ok {
 			out = append(out, name)
 		}
 	}

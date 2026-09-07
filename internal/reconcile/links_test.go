@@ -22,7 +22,7 @@ func linkWorld(runOn string, links []v1alpha1.LinkAllocation, opts ...classOpt) 
 			node("node-b", "10.0.0.2", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, allOpts...)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, allOpts...)},
 		PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
@@ -81,7 +81,7 @@ func TestLinkAllocation(t *testing.T) {
 				node("node-c", "10.0.0.3", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, withSubnet("169.254.77.0/31"))},
+			Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, withSubnet("169.254.77.0/31"))},
 			PortMaps: []*v1alpha1.PortMap{
 				pm("games", "a", 3000, 0, withService("a", "svc")),
 				pm("games", "b", 3001, 0, withService("b", "svc")),
@@ -120,7 +120,7 @@ func TestLinkGC(t *testing.T) {
 			NodeName:   "node-a",
 			Nodes:      []*corev1.Node{node("node-a", "10.0.0.1", map[string]string{"edge": "true"})},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, withLinks(la))},
+			Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, withLinks(la))},
 			Now:        metav1.NewTime(baseTime),
 		}
 	}

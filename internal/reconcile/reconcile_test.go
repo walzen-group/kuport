@@ -38,7 +38,7 @@ func remoteWorld(runOn string, opts ...classOpt) Inputs {
 			node("node-c", "10.0.0.3", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, allOpts...)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, allOpts...)},
 		PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
@@ -73,7 +73,7 @@ func TestRoles(t *testing.T) {
 			NodeName:   "node-a",
 			Nodes:      []*corev1.Node{node("node-a", "10.0.0.1", map[string]string{"edge": "true"})},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"})},
+			Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"})},
 			PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.0.9", node: "node-a", target: "pod-a"}),
@@ -117,7 +117,7 @@ func TestRefusals(t *testing.T) {
 					node("node-c", "10.0.0.3", nil),
 				},
 				Namespaces: []*corev1.Namespace{ns("games", nil)},
-				Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+				Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
 					withLinks(claim("node-a", "node-c", 0)))},
 				PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 				Slices: []*discoveryv1.EndpointSlice{
@@ -178,7 +178,7 @@ func TestAgentAgreement(t *testing.T) {
 				node("node-c", "10.0.0.3", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
 				withLinks(claim("node-a", "node-b", 5)))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
@@ -249,7 +249,7 @@ func multiAcceptingWorld(runOn string) Inputs {
 			node("node-c", "10.0.0.3", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
 			withLinks(claim("node-a", "node-b", 0)),
 			withNodeRows(
 				v1alpha1.NodeStatus{Name: "node-a", Ready: true},
@@ -351,7 +351,7 @@ func TestServingNodeIsChosenPodsNode(t *testing.T) {
 				node("node-b", "10.0.0.2", map[string]string{"edge": "true"}),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
 				withLinks(claim("node-a", "node-b", 0)),
 				withNodeRows(v1alpha1.NodeStatus{Name: "node-b", Ready: true}))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
@@ -401,7 +401,7 @@ func TestMultiAcceptRemotePodWindow(t *testing.T) {
 				node("node-c", "10.0.0.3", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
 				withLinks(links...),
 				// Only the participant S reports a row; the sibling is absent.
 				withNodeRows(v1alpha1.NodeStatus{Name: "node-a", Ready: true}))},
@@ -444,7 +444,7 @@ func windowWorld(runOn string, links ...v1alpha1.LinkAllocation) Inputs {
 			node("node-b", "10.0.0.2", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
 			withLinks(links...),
 			withNodeRows(v1alpha1.NodeStatus{Name: "node-a", Ready: true}))},
 		PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
@@ -529,7 +529,7 @@ func richWorld() Inputs {
 			ns("infra", map[string]string{"public": "yes"}),
 		},
 		Classes: []*v1alpha1.PortMapClass{
-			class("public", map[string]string{"edge": "true"},
+			class("public", []string{"node-a"},
 				withInterfaces("eth0", "eth1"),
 				withLinks(
 					claim("node-a", "node-c", 0),                   // needed by web -> node-c
@@ -537,7 +537,7 @@ func richWorld() Inputs {
 					unusedClaim("node-b", "node-d", 2, &oldUnused), // stale -> drop
 				),
 			),
-			class("internal", map[string]string{"internal": "true"}),
+			class("internal", []string{"node-e"}),
 		},
 		PortMaps: []*v1alpha1.PortMap{
 			pm("games", "web", 3000, 0, withService("web", "svc")),

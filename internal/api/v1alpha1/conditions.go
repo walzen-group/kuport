@@ -34,6 +34,7 @@ const (
 	ReasonPortReserved         = "PortReserved"
 	ReasonPortConflict         = "PortConflict"
 	ReasonInvalidPortRange     = "InvalidPortRange"
+	ReasonInterfaceNotInClass  = "InterfaceNotInClass"
 )
 
 // PortMap Programmed reasons.

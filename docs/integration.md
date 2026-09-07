@@ -237,12 +237,11 @@ kind: PortMapClass
 metadata:
   name: public
 spec:
-  nodeSelector:
-    matchLabels:
-      kuport.wlz.li/edge: "true"
-  interfaces:
-    - enp1s0
-    - wt0
+  nodes:
+    worker-1:
+      interfaces:
+        - enp1s0
+        - wt0
   ports:
     min: 1024
     max: 65535
@@ -258,12 +257,13 @@ spec:
       subnet: 169.254.77.0/24
 ```
 
-Why this shape. The nodeSelector names the nodes that hold the addresses
-clients dial: usually one. Both `enp1s0` (the public interface) and `wt0`
-(the overlay address) go into `interfaces`, so the same mapping answers on
-the LAN address and the overlay address at once, which is what makes one
-PortMap serve both players on the internet and players on the VPN. The
-Vxlan return path is required because the pod will not live on the edge node.
+Why this shape. `nodes` names the nodes that hold the addresses clients dial:
+usually one. Both `enp1s0` (the public interface) and `wt0` (the overlay
+address) go into that node's `interfaces`, so the same mapping answers on the
+LAN address and the overlay address at once, which is what makes one PortMap
+serve both players on the internet and players on the VPN. A mapping that wants
+the overlay alone sets `interfaces: [wt0]` on itself. The Vxlan return path is
+required because the pod will not live on the edge node.
 
 ```yaml
 apiVersion: kuport.wlz.li/v1alpha1
@@ -271,12 +271,13 @@ kind: PortMapClass
 metadata:
   name: intranet
 spec:
-  nodeSelector:
-    matchExpressions:
-      - key: node-role.kubernetes.io/control-plane
-        operator: DoesNotExist
-  interfaces:
-    - wt0
+  nodes:
+    worker-1:
+      interfaces:
+        - wt0
+    worker-2:
+      interfaces:
+        - wt0
   returnPath:
     mode: None
 ```
@@ -294,8 +295,8 @@ Which fields are decisions and which are defaults:
 
 | Field | Decision or default | Notes |
 | --- | --- | --- |
-| nodeSelector | decision | must be written; it selects the accepting nodes |
-| interfaces | decision | must be written; names that exist on every selected node, or the missing ones simply produce no rules there |
+| nodes | decision | must be written; every accepting node by name |
+| nodes.&lt;name&gt;.interfaces | decision | must be written; the names that exist on that node, so nodes with different NIC names belong to one class |
 | ports | default 1..65535 | worth narrowing on a public class |
 | ports.reserved | default none | the admin keeps ports back; nothing else respects them |
 | namespaceSelector | policy decision | empty means every namespace may ask; on a public class that is rarely what you want |

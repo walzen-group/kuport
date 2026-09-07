@@ -35,15 +35,14 @@ func ns(name string, labels map[string]string) *corev1.Namespace {
 // classOpt mutates a class during construction.
 type classOpt func(*v1alpha1.PortMapClass)
 
-// class builds a PortMapClass selecting nodes by the given matchLabels, on one
-// interface, with a Vxlan return path and the default subnet.
-func class(name string, nodeMatch map[string]string, opts ...classOpt) *v1alpha1.PortMapClass {
+// class builds a PortMapClass naming the given nodes, each on one interface,
+// with a Vxlan return path and the default subnet.
+func class(name string, nodes []string, opts ...classOpt) *v1alpha1.PortMapClass {
 	c := &v1alpha1.PortMapClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1alpha1.PortMapClassSpec{
-			NodeSelector: metav1.LabelSelector{MatchLabels: nodeMatch},
-			Interfaces:   []string{"eth0"},
-			ReturnPath:   v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
+			Nodes:      nodesOn(nodes, "eth0"),
+			ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
 		},
 	}
 	for _, o := range opts {
@@ -52,8 +51,33 @@ func class(name string, nodeMatch map[string]string, opts ...classOpt) *v1alpha1
 	return c
 }
 
+// nodesOn builds a class's node map, every named node on the same interfaces.
+func nodesOn(names []string, ifaces ...string) map[string]v1alpha1.NodeInterfaces {
+	out := map[string]v1alpha1.NodeInterfaces{}
+	for _, n := range names {
+		out[n] = v1alpha1.NodeInterfaces{Interfaces: append([]string(nil), ifaces...)}
+	}
+	return out
+}
+
+// withInterfaces puts the same interfaces on every node the class names.
 func withInterfaces(ifaces ...string) classOpt {
-	return func(c *v1alpha1.PortMapClass) { c.Spec.Interfaces = ifaces }
+	return func(c *v1alpha1.PortMapClass) {
+		for n := range c.Spec.Nodes {
+			c.Spec.Nodes[n] = v1alpha1.NodeInterfaces{Interfaces: append([]string(nil), ifaces...)}
+		}
+	}
+}
+
+// withNodeInterfaces puts a specific interface list on one named node, for the
+// case a class covers nodes whose NICs are named differently.
+func withNodeInterfaces(node string, ifaces ...string) classOpt {
+	return func(c *v1alpha1.PortMapClass) {
+		if c.Spec.Nodes == nil {
+			c.Spec.Nodes = map[string]v1alpha1.NodeInterfaces{}
+		}
+		c.Spec.Nodes[node] = v1alpha1.NodeInterfaces{Interfaces: append([]string(nil), ifaces...)}
+	}
 }
 
 func withPorts(min, max int32, reserved ...int32) classOpt {
@@ -129,6 +153,11 @@ func withProto(proto v1alpha1.Protocol) pmOpt {
 
 func withEndPort(end int32) pmOpt {
 	return func(p *v1alpha1.PortMap) { p.Spec.EndPort = ptr(end) }
+}
+
+// withPMInterfaces narrows a mapping to the given interface names.
+func withPMInterfaces(ifaces ...string) pmOpt {
+	return func(p *v1alpha1.PortMap) { p.Spec.Interfaces = ifaces }
 }
 
 func withService(name, port string) pmOpt {

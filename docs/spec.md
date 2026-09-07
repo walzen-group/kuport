@@ -88,11 +88,15 @@ kind: PortMapClass
 metadata:
   name: public
 spec:
-  nodeSelector:
-    matchLabels:
-      kuport.wlz.li/edge: "true"
-  interfaces:
-    - enp1s0
+  nodes:
+    worker-1:
+      interfaces:
+        - wt0
+        - enp1s0
+    worker-2:
+      interfaces:
+        - wt0
+        - eth0
   ports:
     min: 1024
     max: 65535
@@ -110,8 +114,8 @@ spec:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| nodeSelector | label selector | Nodes that may accept traffic for this class: its accepting nodes. Each mapping the class admits is programmed on exactly one of them, its serving node. Required. |
-| interfaces | list of string | Interface names the DNAT rules match on. One rule per interface, on the mapping's serving node. Required, at least one. |
+| nodes | map of node name to object | Nodes that may accept traffic for this class: its accepting nodes. Each mapping the class admits is programmed on exactly one of them, its serving node. A name with no Node object in the cluster is skipped. Required, at least one entry. |
+| nodes.&lt;name&gt;.interfaces | list of string | Interface names that node's DNAT rules match on. One rule per interface, on the mapping's serving node. Naming them per node lets one class cover nodes whose NICs are named differently. Required, at least one. |
 | ports.min, ports.max | int | The range a PortMap may ask for. Defaults 1, 65535. |
 | ports.reserved | list of int | Ports the admin keeps back. A PortMap naming one is rejected in status. |
 | namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
@@ -145,11 +149,31 @@ spec:
 | protocol | enum | TCP or UDP. Required, immutable. |
 | port | int | The port clients dial on an accepting node, and the port the pod receives on. With endPort set, the first port of the range. Required, immutable. |
 | endPort | int | Last port of an inclusive range starting at port. Omit for a single port. Immutable together with port; the API rejects endPort below port. One nftables `dport <first>-<last>` match covers a whole range. |
+| interfaces | list of string | The interfaces this mapping binds on, narrowing what the class gives each node. Empty selects every interface the class gives the node. Mutable. |
 | serviceRef.name | string | A Service in the same namespace. Required. |
 | serviceRef.port | string | The named port on that Service. Required. |
 
 The Service may be any type, ClusterIP included. It exists so the agent has
 endpoints to follow and a named port to resolve. kuport never touches it.
+
+### Choosing interfaces
+
+A mapping's interfaces resolve against each accepting node's own list, so one
+list covers nodes whose NICs are named differently. Given a class that gives
+worker-1 wt0 and enp1s0, and worker-2 wt0 and eth0:
+
+| The mapping asks for | worker-1 binds | worker-2 binds |
+| --- | --- | --- |
+| nothing | wt0, enp1s0 | wt0, eth0 |
+| wt0, enp1s0, eth0 | wt0, enp1s0 | wt0, eth0 |
+| wt0 | wt0 | wt0 |
+| enp1s0 | enp1s0 | nothing |
+
+Asking for wt0 alone keeps a mapping on the overlay. Asking for the LAN
+interfaces as well as wt0 reaches clients on both. A name no node in the class
+carries is rejected with reason InterfaceNotInClass, which is what catches a
+typo; a name some node carries is accepted, since binding on a subset of the
+nodes is the point of the field.
 
 The immutable fields are immutable because changing them is indistinguishable
 from deleting one mapping and creating another, and the reconcile is simpler if
@@ -238,11 +262,13 @@ time that became true; an entry unused for 24h is dropped. The slot fixes the
 routing table (`200 + slot`) and the packet mark (`0x6b700000 | slot`), so a
 claim is never renumbered while a link uses it.
 
-One `nodes` row per selected node, written by that node's agent, carrying the
+One `nodes` row per accepting node, written by that node's agent, carrying the
 MTU numbers and interface addresses it read from the host. The row is ready when
-every interface the class names resolves to an address on that node; otherwise
-it carries a message naming the first interface that does not. The Ready
-condition is per class:
+every interface the class gives that node resolves to an address there;
+otherwise it carries a message naming the first interface that does not. The
+class names each node's interfaces, so an interface that fails to resolve is a
+mistake in the class rather than a node that lacks the NIC, and the row says so
+rather than skipping it. The Ready condition is per class:
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |

@@ -112,6 +112,14 @@ func validateStandalone(in Inputs, idx *index, m *mapping) (reason, msg string, 
 		}
 	}
 
+	// A mapping narrows the class's interfaces, and a name no node in the class
+	// carries narrows to nothing everywhere. Naming a name some nodes carry is
+	// the point of the field, so only a name no node carries is rejected.
+	if iface, ok := unknownInterface(m.class, pm); !ok {
+		return v1alpha1.ReasonInterfaceNotInClass,
+			fmt.Sprintf("interface %q is on no node of class %q", iface, m.class.Name), false
+	}
+
 	return v1alpha1.ReasonValid, "", true
 }
 
@@ -193,6 +201,27 @@ func interval(pm *v1alpha1.PortMap) (first, last int32) {
 		last = *pm.Spec.EndPort
 	}
 	return
+}
+
+// unknownInterface returns the first interface a mapping asks for that no node
+// in the class carries, and false with it. A mapping asking for nothing, or for
+// names every one of which some node carries, returns true.
+func unknownInterface(class *v1alpha1.PortMapClass, pm *v1alpha1.PortMap) (string, bool) {
+	if len(pm.Spec.Interfaces) == 0 {
+		return "", true
+	}
+	known := map[string]bool{}
+	for _, ni := range class.Spec.Nodes {
+		for _, iface := range ni.Interfaces {
+			known[iface] = true
+		}
+	}
+	for _, iface := range pm.Spec.Interfaces {
+		if !known[iface] {
+			return iface, false
+		}
+	}
+	return "", true
 }
 
 // portBounds returns a class's port bounds. An absent ports block means 1..65535

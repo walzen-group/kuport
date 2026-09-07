@@ -181,9 +181,35 @@ func returnPathMode(class *v1alpha1.PortMapClass) v1alpha1.ReturnPathMode {
 	return class.Spec.ReturnPath.Mode
 }
 
-// interfacesOf returns the interfaces a class programs DNAT rules on.
-func interfacesOf(class *v1alpha1.PortMapClass) []string {
-	return class.Spec.Interfaces
+// classInterfacesOn returns the interfaces a class gives one node, sorted. A
+// node the class does not name gets none.
+func classInterfacesOn(class *v1alpha1.PortMapClass, node string) []string {
+	ni, ok := class.Spec.Nodes[node]
+	if !ok {
+		return nil
+	}
+	out := append([]string(nil), ni.Interfaces...)
+	sort.Strings(out)
+	return out
+}
+
+// interfacesFor returns the interfaces one mapping programs DNAT rules on at
+// one node: what the class gives that node, narrowed by the mapping's own list
+// when it sets one. A name the mapping asks for that the node does not carry
+// contributes nothing, which is what lets one list cover nodes whose NICs are
+// named differently.
+func interfacesFor(class *v1alpha1.PortMapClass, node string, pm *v1alpha1.PortMap) []string {
+	have := classInterfacesOn(class, node)
+	if pm == nil || len(pm.Spec.Interfaces) == 0 {
+		return have
+	}
+	var out []string
+	for _, iface := range have {
+		if contains(pm.Spec.Interfaces, iface) {
+			out = append(out, iface)
+		}
+	}
+	return out
 }
 
 // nodeAddrOf returns a node's InternalIP from the index, or "" when unknown.

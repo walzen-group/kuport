@@ -29,7 +29,7 @@ func TestStatusOwnedByServingNode(t *testing.T) {
 				node("node-b", "10.0.0.2", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
 				withLinks(claim("node-a", "node-b", 0)))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
@@ -66,7 +66,7 @@ func TestPublishedRows(t *testing.T) {
 			node("node-c", "10.0.0.3", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes: []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"},
+		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
 			withInterfaces("eth0", "eth1"))},
 		PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0, withGeneration(7))},
 		Slices: []*discoveryv1.EndpointSlice{
@@ -107,7 +107,7 @@ func coopWorld(rows ...v1alpha1.NodeStatus) Inputs {
 		NodeName:   "node-a",
 		Nodes:      []*corev1.Node{node("node-a", "10.0.0.1", map[string]string{"edge": "true"})},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, opts...)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, opts...)},
 		PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.0.9", node: "node-a", target: "pod-a"}),
@@ -160,7 +160,7 @@ func TestProgrammedGatesOnNodeRows(t *testing.T) {
 func TestNodeRowHonestReadiness(t *testing.T) {
 	t.Run("missing interface", func(t *testing.T) {
 		in := coopWorld()
-		in.Classes[0].Spec.Interfaces = []string{"eth0", "wt0"}
+		in.Classes[0].Spec.Nodes["node-a"] = v1alpha1.NodeInterfaces{Interfaces: []string{"eth0", "wt0"}}
 		in.InterfaceAddrs = map[string]string{"eth0": "10.0.0.1"}
 		row := Compute(in).ClassStatus["public"].Node
 		if row.Ready {
@@ -179,7 +179,7 @@ func TestNodeRowHonestReadiness(t *testing.T) {
 
 	t.Run("every interface resolves", func(t *testing.T) {
 		in := coopWorld()
-		in.Classes[0].Spec.Interfaces = []string{"eth0", "wt0"}
+		in.Classes[0].Spec.Nodes["node-a"] = v1alpha1.NodeInterfaces{Interfaces: []string{"eth0", "wt0"}}
 		in.InterfaceAddrs = map[string]string{"eth0": "10.0.0.1", "wt0": "100.64.0.7"}
 		row := Compute(in).ClassStatus["public"].Node
 		if !row.Ready || row.Message != "" {

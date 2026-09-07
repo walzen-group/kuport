@@ -20,8 +20,9 @@ spec:
     - jsonPath: .spec.returnPath.mode
       name: MODE
       type: string
-    - jsonPath: .spec.interfaces
-      name: INTERFACES
+    - jsonPath: .status.nodes[*].name
+      name: NODES
+      priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
@@ -56,14 +57,6 @@ spec:
               accept traffic, on which interfaces, which ports may be asked for, which
               namespaces may ask, and how return traffic gets home.
             properties:
-              interfaces:
-                description: |-
-                  Interface names the DNAT rules match on, per accepting node. One rule per
-                  interface per mapping.
-                items:
-                  type: string
-                minItems: 1
-                type: array
               namespaceSelector:
                 description: Which namespaces may reference this class. Empty selects
                   every namespace.
@@ -111,53 +104,28 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              nodeSelector:
-                description: Nodes that accept traffic for this class. Every matching
-                  node gets rules.
-                properties:
-                  matchExpressions:
-                    description: matchExpressions is a list of label selector requirements.
-                      The requirements are ANDed.
-                    items:
+              nodes:
+                additionalProperties:
+                  description: NodeInterfaces is one accepting node's interface list.
+                  properties:
+                    interfaces:
                       description: |-
-                        A label selector requirement is a selector that contains values, a key, and an operator that
-                        relates the key and values.
-                      properties:
-                        key:
-                          description: key is the label key that the selector applies
-                            to.
-                          type: string
-                        operator:
-                          description: |-
-                            operator represents a key's relationship to a set of values.
-                            Valid operators are In, NotIn, Exists and DoesNotExist.
-                          type: string
-                        values:
-                          description: |-
-                            values is an array of string values. If the operator is In or NotIn,
-                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
-                            the values array must be empty. This array is replaced during a strategic
-                            merge patch.
-                          items:
-                            type: string
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      required:
-                      - key
-                      - operator
-                      type: object
-                    type: array
-                    x-kubernetes-list-type: atomic
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
-                      map is equivalent to an element of matchExpressions, whose key field is "key", the
-                      operator is "In", and the values array contains only "value". The requirements are ANDed.
-                    type: object
+                        Interface names this node's DNAT rules match on. One rule per interface
+                        per mapping. A PortMap narrows this set with its own interfaces field.
+                      items:
+                        type: string
+                      minItems: 1
+                      type: array
+                  required:
+                  - interfaces
+                  type: object
+                description: |-
+                  Nodes that accept traffic for this class, keyed by node name. Each entry
+                  names the interfaces that node's DNAT rules bind on, so nodes that carry
+                  different NIC names belong to one class. A node absent here accepts
+                  nothing for the class.
+                minProperties: 1
                 type: object
-                x-kubernetes-map-type: atomic
               ports:
                 description: PortRange bounds the ports a PortMap in this class may
                   ask for.
@@ -217,8 +185,7 @@ spec:
                 - mode
                 type: object
             required:
-            - interfaces
-            - nodeSelector
+            - nodes
             - returnPath
             type: object
           status:

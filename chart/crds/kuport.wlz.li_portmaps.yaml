@@ -79,6 +79,18 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              interfaces:
+                description: |-
+                  Interfaces this mapping binds on, narrowing what the class gives each
+                  accepting node. A name absent from a node's class entry binds nothing on
+                  that node, so one list covers nodes with different NIC names: asking for
+                  wt0, enp1s0 and eth0 binds wt0 everywhere, enp1s0 on the nodes carrying
+                  it, and eth0 on the nodes carrying that. Empty selects every interface
+                  the class gives the node. Mutable, because adding or removing one adds or
+                  removes DNAT rules and nothing else.
+                items:
+                  type: string
+                type: array
               port:
                 description: |-
                   The port clients dial on an accepting node, and the port the pod

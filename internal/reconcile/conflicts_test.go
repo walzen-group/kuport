@@ -19,7 +19,7 @@ func baseInputs(pms []*v1alpha1.PortMap, opts ...classOpt) Inputs {
 		NodeName:   "node-a",
 		Nodes:      []*corev1.Node{node("node-a", "10.0.0.1", map[string]string{"edge": "true"})},
 		Namespaces: []*corev1.Namespace{ns("games", map[string]string{"public": "yes"})},
-		Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, opts...)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, opts...)},
 		PortMaps:   pms,
 		Now:        metav1.NewTime(baseTime),
 	}
@@ -140,7 +140,7 @@ func TestNamespaceGating(t *testing.T) {
 				NodeName:   "node-a",
 				Nodes:      []*corev1.Node{node("node-a", "10.0.0.1", map[string]string{"edge": "true"})},
 				Namespaces: []*corev1.Namespace{ns("games", tt.nsLabels)},
-				Classes:    []*v1alpha1.PortMapClass{class("public", map[string]string{"edge": "true"}, opts...)},
+				Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, opts...)},
 				PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 				Now:        metav1.NewTime(baseTime),
 			}

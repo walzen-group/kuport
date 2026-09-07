@@ -8,15 +8,13 @@ import (
 // accept traffic, on which interfaces, which ports may be asked for, which
 // namespaces may ask, and how return traffic gets home.
 type PortMapClassSpec struct {
-	// Nodes that accept traffic for this class. Every matching node gets rules.
+	// Nodes that accept traffic for this class, keyed by node name. Each entry
+	// names the interfaces that node's DNAT rules bind on, so nodes that carry
+	// different NIC names belong to one class. A node absent here accepts
+	// nothing for the class.
 	// +kubebuilder:validation:Required
-	NodeSelector metav1.LabelSelector `json:"nodeSelector"`
-
-	// Interface names the DNAT rules match on, per accepting node. One rule per
-	// interface per mapping.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinItems=1
-	Interfaces []string `json:"interfaces"`
+	// +kubebuilder:validation:MinProperties=1
+	Nodes map[string]NodeInterfaces `json:"nodes"`
 
 	// +optional
 	Ports *PortRange `json:"ports,omitempty"`
@@ -27,6 +25,15 @@ type PortMapClassSpec struct {
 
 	// +kubebuilder:validation:Required
 	ReturnPath ReturnPath `json:"returnPath"`
+}
+
+// NodeInterfaces is one accepting node's interface list.
+type NodeInterfaces struct {
+	// Interface names this node's DNAT rules match on. One rule per interface
+	// per mapping. A PortMap narrows this set with its own interfaces field.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Interfaces []string `json:"interfaces"`
 }
 
 // PortRange bounds the ports a PortMap in this class may ask for.
@@ -171,7 +178,7 @@ type NodeStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=pmc
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="MODE",type=string,JSONPath=`.spec.returnPath.mode`
-// +kubebuilder:printcolumn:name="INTERFACES",type=string,JSONPath=`.spec.interfaces`
+// +kubebuilder:printcolumn:name="NODES",type=string,priority=1,JSONPath=`.status.nodes[*].name`
 // +kubebuilder:printcolumn:name="AGE",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // PortMapClass is the cluster-scoped, admin-authored definition of which nodes

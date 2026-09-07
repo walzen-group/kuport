@@ -155,15 +155,17 @@ func statusOwner(in Inputs, m *mapping) string {
 	return ""
 }
 
-// nodeRowFor builds this node's class row: ready only when every interface
-// the class selects resolves to an address here, per the host read handed in
-// through Inputs. The message names the first interface that does not, in
-// the shape spec.md documents. Addresses carries the interfaces that do
-// resolve, the report the PortMap status writer reads for rows naming this
-// node; an unresolved interface is absent there and in the message.
+// nodeRowFor builds this node's class row: ready only when every interface the
+// class gives this node resolves to an address here, per the host read handed
+// in through Inputs. The class names each node's interfaces, so a name that
+// does not resolve is a mistake in the class rather than a node that lacks the
+// NIC. The message names the first interface that does not, in the shape
+// spec.md documents. Addresses carries the interfaces that do resolve, the
+// report the PortMap status writer reads for rows naming this node; an
+// unresolved interface is absent there and in the message.
 func nodeRowFor(in Inputs, class *v1alpha1.PortMapClass) v1alpha1.NodeStatus {
 	row := v1alpha1.NodeStatus{Name: in.NodeName, Ready: true}
-	for _, iface := range class.Spec.Interfaces {
+	for _, iface := range classInterfacesOn(class, in.NodeName) {
 		addr, ok := in.InterfaceAddrs[iface]
 		if !ok {
 			row.Ready = false
@@ -202,7 +204,7 @@ func publishedRows(m *mapping) []v1alpha1.PublishedAddress {
 		return nil
 	}
 	var rows []v1alpha1.PublishedAddress
-	for _, iface := range interfacesOf(m.class) {
+	for _, iface := range interfacesFor(m.class, m.serving, m.pm) {
 		rows = append(rows, v1alpha1.PublishedAddress{
 			Node:      m.serving,
 			Interface: iface,

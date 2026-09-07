@@ -37,6 +37,16 @@ type PortMapSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	EndPort *int32 `json:"endPort,omitempty"`
 
+	// Interfaces this mapping binds on, narrowing what the class gives each
+	// accepting node. A name absent from a node's class entry binds nothing on
+	// that node, so one list covers nodes with different NIC names: asking for
+	// wt0, enp1s0 and eth0 binds wt0 everywhere, enp1s0 on the nodes carrying
+	// it, and eth0 on the nodes carrying that. Empty selects every interface
+	// the class gives the node. Mutable, because adding or removing one adds or
+	// removes DNAT rules and nothing else.
+	// +optional
+	Interfaces []string `json:"interfaces,omitempty"`
+
 	// +kubebuilder:validation:Required
 	ServiceRef ServiceRef `json:"serviceRef"`
 }

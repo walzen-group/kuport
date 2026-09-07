@@ -148,7 +148,9 @@ func TestWriteClassStatusPublishesAddresses(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "public"},
 		Spec: v1alpha1.PortMapClassSpec{
 			ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan},
-			Interfaces: []string{"enp1s0", "wt0", "missing0"},
+			Nodes: map[string]v1alpha1.NodeInterfaces{
+				"edge-a": {Interfaces: []string{"enp1s0", "wt0", "missing0"}},
+			},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
