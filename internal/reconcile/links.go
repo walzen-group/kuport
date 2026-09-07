@@ -169,6 +169,11 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 		thisEnd, peerEnd = hi, lo
 	}
 
+	// The kernel keys a VXLAN device by VNI and UDP port, so two links on one
+	// node cannot share both. Under Multi serving the pod's node holds a link
+	// per remote accepting node, so the VNI carries the slot: the class's VNI
+	// is the base and each pair sits at base+slot. Both ends derive it from the
+	// same recorded slot, so they agree without negotiating.
 	vni, port := vxlanParams(class)
 	return linkParams{
 		slot:       slot,
@@ -181,7 +186,7 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 		peerNode32: netip.PrefixFrom(remote, 32),
 		mark:       markBase | uint32(slot),
 		table:      200 + uint32(slot),
-		vni:        vni,
+		vni:        vni + uint32(slot),
 		port:       port,
 	}, true
 }

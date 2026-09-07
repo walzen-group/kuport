@@ -665,7 +665,14 @@ func TestMultiServingUsesConntrackReturn(t *testing.T) {
 	}
 
 	if len(res.State.Links) != 2 {
-		t.Errorf("Links = %d, want one per remote programmer", len(res.State.Links))
+		t.Fatalf("Links = %d, want one per remote programmer", len(res.State.Links))
+	}
+	// The kernel keys a VXLAN device by VNI and UDP port, so two links on one
+	// node sharing both is refused with EEXIST and the whole apply fails. Only
+	// a cluster showed this; the counts above all passed while it was broken.
+	if a, b := res.State.Links[0], res.State.Links[1]; a.VNI == b.VNI && a.Port == b.Port {
+		t.Errorf("links %s and %s share vni %d on port %d; the kernel refuses the second",
+			a.Name, b.Name, a.VNI, a.Port)
 	}
 	if len(res.State.Routes) != 2 {
 		t.Errorf("Routes = %d, want one return route per peer", len(res.State.Routes))
