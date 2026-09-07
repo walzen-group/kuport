@@ -169,4 +169,28 @@ func TestLinkGC(t *testing.T) {
 	})
 }
 
+// TestLinkNameIsPerClass: two classes may each want a link between the same two
+// nodes, on their own subnet and VNI. One device name for both means whichever
+// applied second routes via an address the existing device does not carry, the
+// apply fails with "network is unreachable", and that node's agent never goes
+// ready, which parks the DaemonSet rollout behind it.
+func TestLinkNameIsPerClass(t *testing.T) {
+	a := linkName("public", "node-b")
+	b := linkName("test-single", "node-b")
+	if a == b {
+		t.Errorf("linkName is %s for both classes; a node in two classes gets one device for two links", a)
+	}
+
+	// Both ends and every agent must still agree, so the name stays a pure
+	// function of the class and the peer.
+	if again := linkName("public", "node-b"); again != a {
+		t.Errorf("linkName is not stable: %s then %s", a, again)
+	}
+
+	// The device name has to fit the kernel's 15-character interface limit.
+	if len(a) != 12 {
+		t.Errorf("linkName = %q, want 12 characters", a)
+	}
+}
+
 var in0now = metav1.NewTime(baseTime)

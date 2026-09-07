@@ -177,7 +177,7 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 	vni, port := vxlanParams(class)
 	return linkParams{
 		slot:       slot,
-		name:       linkName(peer),
+		name:       linkName(class.Name, peer),
 		localAddr:  local,
 		remoteAddr: remote,
 		thisEnd:    thisEnd,
@@ -252,10 +252,17 @@ func lowestFree(used map[int]bool, total int) int {
 	return -1
 }
 
-// linkName is the vxlan device name for the link to a peer: a short hash of the
-// peer's node name, so both ends and every agent name the same device.
-func linkName(peer string) string {
-	sum := sha256.Sum256([]byte(peer))
+// linkName is the vxlan device name for one class's link to a peer: a short
+// hash of the class name and the peer's node name, so both ends and every agent
+// name the same device.
+//
+// The class is in the hash because two classes can want a link between the same
+// pair of nodes, each on its own subnet and VNI. Hashing the peer alone gave
+// them one device name, so whichever class applied second added a route via an
+// address the existing device did not carry and failed with "network is
+// unreachable", which parked that node's agent and with it the DaemonSet.
+func linkName(class, peer string) string {
+	sum := sha256.Sum256([]byte(class + "/" + peer))
 	return "kup-" + hex.EncodeToString(sum[:])[:8]
 }
 
