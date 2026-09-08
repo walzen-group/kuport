@@ -240,11 +240,12 @@ func overlayConditions(base []metav1.Condition, class *v1alpha1.PortMapClass, hs
 		return base
 	}
 
+	// The CNI's routing mode used to be checked here, because the inbound leg
+	// rode the CNI's tunnel and native routing dropped it. Since v0.4.0 both
+	// legs ride kuport's own return link, so the mode no longer matters. What
+	// still does is the port: two VXLAN devices cannot share a VNI and port.
 	var reason, msg string
 	switch {
-	case hs.tunnelKnown && !hs.tunnelOK:
-		reason = v1alpha1.ReasonTunnelModeRequired
-		msg = "the CNI is not in tunnel mode; native routing drops the inbound leg"
 	case classVxlanPort(class) == hs.cniPort:
 		reason = v1alpha1.ReasonVxlanPortConflict
 		msg = "return-path VXLAN port collides with the CNI's tunnel port"

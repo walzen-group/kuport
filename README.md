@@ -45,12 +45,18 @@ If you are considering it: install on a staging cluster, walk
 [docs/integration.md](docs/integration.md) end to end, and expect to file the
 first issues.
 
-- [docs/spec.md](docs/spec.md): the design, the datapath with its
-  measurements, diagrams, and the closed decisions.
-- [docs/operations.md](docs/operations.md): a mapping is not working, and
-  every condition reason means something.
-- [docs/integration.md](docs/integration.md): installing kuport into a
-  specific cluster, written for whoever does the installing.
+[docs/README.md](docs/README.md) indexes all of it. The ones most people want:
+
+- [docs/overview.md](docs/overview.md): the problem, the goals, and what a
+  cluster has to provide.
+- [docs/api.md](docs/api.md): both kinds field by field, and what status
+  reports.
+- [docs/datapath.md](docs/datapath.md): the packet's path, every rule on it
+  with the measurement that confirmed it, and the serving modes.
+- [docs/troubleshooting.md](docs/troubleshooting.md): a mapping is not working,
+  and what every condition reason means.
+- [docs/integration.md](docs/integration.md): installing kuport into a specific
+  cluster, written for whoever does the installing.
 
 ## Install
 

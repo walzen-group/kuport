@@ -51,19 +51,33 @@ func TestRoles(t *testing.T) {
 	t.Run("accepting only", func(t *testing.T) {
 		st := Compute(remoteWorld("node-a")).State
 		assertCounts(t, st, counts{dnat: 1, exempt: 1, mark: 0, links: 1, rules: 0, routes: 0})
-		if st.Exempt[0].OifName != "cilium_host" || st.Exempt[0].Negate {
-			t.Errorf("exempt = %+v, want cilium_host non-negated", st.Exempt[0])
+		// A remote pod is reached over this node's own return link, so the
+		// translation targets the link's far end and the exemption follows the
+		// device the packet leaves by.
+		if st.Exempt[0].OifName != st.Links[0].Name || st.Exempt[0].Negate {
+			t.Errorf("exempt = %+v, want %s non-negated", st.Exempt[0], st.Links[0].Name)
+		}
+		if !st.DNAT[0].ToAddr.IsLinkLocalUnicast() {
+			t.Errorf("DNAT target = %s, want the far end of the return link", st.DNAT[0].ToAddr)
 		}
 	})
 
 	t.Run("target only", func(t *testing.T) {
 		st := Compute(remoteWorld("node-b")).State
-		assertCounts(t, st, counts{dnat: 0, exempt: 1, mark: 1, links: 1, rules: 2, routes: 1})
+		assertCounts(t, st, counts{dnat: 1, exempt: 1, mark: 1, links: 1, rules: 2, routes: 1})
 		if st.Exempt[0].OifName != "cilium_*" || !st.Exempt[0].Negate || !st.Exempt[0].PortIsSrc {
 			t.Errorf("exempt = %+v, want cilium_* negated PortIsSrc", st.Exempt[0])
 		}
 		if st.Mark[0].Mark != markBase {
 			t.Errorf("mark = %#x, want %#x", st.Mark[0].Mark, markBase)
+		}
+		// The request arrives over the link, so this node completes the
+		// translation to the pod, matched on the device and its link address.
+		if st.DNAT[0].ToAddr.String() != "10.244.5.5" || st.DNAT[0].DstAddr == nil {
+			t.Errorf("DNAT = %+v, want the pod, matched on this node's link address", st.DNAT[0])
+		}
+		if st.DNAT[0].Iface != st.Links[0].Name {
+			t.Errorf("DNAT iface = %s, want the return link %s", st.DNAT[0].Iface, st.Links[0].Name)
 		}
 	})
 
@@ -192,16 +206,24 @@ func TestAgentAgreement(t *testing.T) {
 	b := Compute(world("node-b")) // target node, holds the pod
 	c := Compute(world("node-c")) // bystander
 
-	// Chosen endpoint: node-a forwards to it, node-b marks replies from it.
-	if len(a.State.DNAT) != 1 || len(b.State.Mark) != 1 {
-		t.Fatalf("expected node-a DNAT and node-b Mark, got %d/%d", len(a.State.DNAT), len(b.State.Mark))
+	// Chosen endpoint: node-a hands the request to the link, node-b completes
+	// the translation to the pod and marks replies coming from it. Both ends
+	// have to name the same pod, which is what makes the two halves one flow.
+	if len(a.State.DNAT) != 1 || len(b.State.DNAT) != 1 || len(b.State.Mark) != 1 {
+		t.Fatalf("expected a DNAT on both nodes and a Mark on node-b, got %d/%d/%d",
+			len(a.State.DNAT), len(b.State.DNAT), len(b.State.Mark))
 	}
-	if a.State.DNAT[0].ToAddr.String() != b.State.Mark[0].SrcAddr.String() {
-		t.Errorf("endpoint disagreement: node-a DNAT %s vs node-b mark %s",
-			a.State.DNAT[0].ToAddr, b.State.Mark[0].SrcAddr)
+	if b.State.DNAT[0].ToAddr.String() != b.State.Mark[0].SrcAddr.String() {
+		t.Errorf("endpoint disagreement: node-b DNAT %s vs node-b mark %s",
+			b.State.DNAT[0].ToAddr, b.State.Mark[0].SrcAddr)
 	}
-	if a.State.DNAT[0].ToAddr.String() != "10.244.5.5" {
-		t.Errorf("chosen endpoint = %s, want 10.244.5.5", a.State.DNAT[0].ToAddr)
+	if b.State.DNAT[0].ToAddr.String() != "10.244.5.5" {
+		t.Errorf("chosen endpoint = %s, want 10.244.5.5", b.State.DNAT[0].ToAddr)
+	}
+	// node-a points at node-b's end of the /31, which node-b matches on.
+	if a.State.DNAT[0].ToAddr.String() != b.State.Links[0].LinkAddr.Addr().String() {
+		t.Errorf("node-a translates to %s, node-b listens on %s",
+			a.State.DNAT[0].ToAddr, b.State.Links[0].LinkAddr.Addr())
 	}
 
 	// Accepting node: node-b's link points its outer header at node-a, and its

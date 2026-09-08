@@ -4,7 +4,7 @@ Written to the agent doing the integration. It assumes you have the cluster's
 repo in front of you and nothing else: no conversation, no notes. You are
 installing kuport, a DaemonSet that programs nftables and routes so a TCP or
 UDP port on one node reaches a pod on another node with the client's source
-address intact. Read docs/spec.md for why it is shaped this way; this page is
+address intact. Read docs/overview.md for why it is shaped this way; this page is
 the procedure.
 
 One fact before any step: kuport was built without access to a cluster. Its
@@ -13,7 +13,7 @@ toolchain and run again in CI on every push; the end-to-end script the spec
 describes has not been written, because no cluster was available to write it
 against. Your cluster will be among the first. Verify each step below against
 the observable it names rather than trusting the sequence, and when something
-refuses to match, docs/operations.md is written for exactly that moment.
+refuses to match, docs/troubleshooting.md is written for exactly that moment.
 
 ## Preconditions
 
@@ -295,13 +295,13 @@ Which fields are decisions and which are defaults:
 
 | Field | Decision or default | Notes |
 | --- | --- | --- |
-| servingMode | default Single | `Multi` puts the rules on every accepting node, which is what a routed virtual address needs. It costs a return link per accepting node without the pod and depends on conntrack; see docs/spec.md |
+| servingMode | default Single | `Multi` puts the rules on every accepting node, which is what a routed virtual address needs. It costs a return link per accepting node without the pod and depends on conntrack; see docs/datapath.md |
 | nodes | decision | must be written; every accepting node by name |
 | nodes.&lt;name&gt;.interfaces | decision | must be written; the names that exist on that node, so nodes with different NIC names belong to one class |
 | ports | default 1..65535 | worth narrowing on a public class |
 | ports.reserved | default none | the admin keeps ports back; nothing else respects them |
 | namespaceSelector | policy decision | empty means every namespace may ask; on a public class that is rarely what you want |
-| returnPath.mode | decision | required; Vxlan or None. Which mappings None refuses, and the reply path that makes the refusal necessary, are in docs/spec.md under returnPath mode |
+| returnPath.mode | decision | required; Vxlan or None. Which mappings None refuses, and the reply path that makes the refusal necessary, are in docs/datapath.md under returnPath mode |
 | returnPath.vxlan.vni | default 4242 | anything that does not collide with other vxlan use on the mesh |
 | returnPath.vxlan.port | default 4790 | must differ from the CNI's 8472 |
 | returnPath.vxlan.subnet | default 169.254.77.0/24 | /31 per node pair, 128 slots; link-local space avoids route table surgery |
@@ -320,7 +320,7 @@ kubectl get portmapclass public -o jsonpath='{.status.conditions}'
 ```
 
 Expected result: `Ready=True, reason Valid`. A false condition's reason is
-documented row by row in docs/operations.md. The `nodes[]` rows fill in as
+documented row by row in docs/troubleshooting.md. The `nodes[]` rows fill in as
 each agent reports; an empty list after a minute means no selected node is
 running an agent.
 
@@ -379,7 +379,7 @@ are complete from the start; only the address can lag a pass.
 Step 5 is the only one that proves the datapath. Steps 1-4 describe what the
 agents wrote and reported; they can all be green while the port stays shut,
 most often because of a host firewall in `filter`, which kuport neither writes
-nor inspects. If 1-4 pass and 5 times out: docs/operations.md, the host
+nor inspects. If 1-4 pass and 5 times out: docs/troubleshooting.md, the host
 firewall section and the counters section, in that order.
 
 ## What kuport will not do

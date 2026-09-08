@@ -352,18 +352,22 @@ func TestLinkClaimCollision(t *testing.T) {
 	}
 }
 
-// TestConditionOverlay checks the host-only class conditions layer over Compute's
-// Ready condition with the right precedence: tunnel mode first, then a port
-// collision, and neither for a None-mode class.
+// TestConditionOverlay checks the host-only class conditions layer over
+// Compute's Ready condition: a port collision refuses the class, and a
+// None-mode class takes neither.
+//
+// The CNI's routing mode was checked here until v0.4.0, when both legs moved
+// onto kuport's own return link and the mode stopped deciding anything. A class
+// is accepted now whether the CNI tunnels or routes natively.
 func TestConditionOverlay(t *testing.T) {
 	validReady := []metav1.Condition{{
 		Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonValid,
 	}}
 
-	t.Run("native routing refuses the class", func(t *testing.T) {
+	t.Run("native routing no longer refuses the class", func(t *testing.T) {
 		got := overlayConditions(validReady, vxlanClass("public", 0),
 			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472}, fixedNow())
-		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonTunnelModeRequired)
+		assertReady(t, got, metav1.ConditionTrue, v1alpha1.ReasonValid)
 	})
 
 	t.Run("port collision refuses the class", func(t *testing.T) {
@@ -372,10 +376,10 @@ func TestConditionOverlay(t *testing.T) {
 		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonVxlanPortConflict)
 	})
 
-	t.Run("tunnel failure outranks port collision", func(t *testing.T) {
+	t.Run("port collision refuses it under native routing too", func(t *testing.T) {
 		got := overlayConditions(validReady, vxlanClass("public", 8472),
 			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472}, fixedNow())
-		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonTunnelModeRequired)
+		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonVxlanPortConflict)
 	})
 
 	t.Run("tunnel unknown leaves Compute's condition alone", func(t *testing.T) {

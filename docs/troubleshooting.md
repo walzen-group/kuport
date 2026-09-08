@@ -1,15 +1,12 @@
-# kuport operations
+# Troubleshooting
 
 For the person holding a mapping that is not working. Each section names the
 command to run and the answer that tells you what to do next.
 
-One honest note up front: kuport shipped from unit, golden and envtest tests
-and nothing else. There was no test cluster while it was written, and the
-hand-run end-to-end script the spec describes has not been written yet. Where
-this page describes a failure mode, it comes from the design measurements in
-docs/spec.md or from the conditions the code reports, not from an incident
-log. A cluster outage is still the place where new failure modes will be
-found.
+Where this page describes a failure mode, it comes from the design measurements
+in [datapath.md](datapath.md), from a condition the code reports, or from what a
+live cluster has done. It is not an incident log, and a cluster outage is still
+where new failure modes will be found.
 
 ## Reading status
 
@@ -148,8 +145,8 @@ loop.
 
 kuport writes `nat` and `mangle` chains in its own table. It writes nothing in
 `filter`, and it does not look for a foreign filter chain either. That is a
-decision, recorded in docs/spec.md: a workload-authored PortMap must not be
-able to punch a hole in the host firewall.
+decision, recorded in [decisions.md](decisions.md#host-firewall): a
+workload-authored PortMap must not be able to punch a hole in the host firewall.
 
 The consequence is the most likely first-install surprise: a node running
 firewalld, ufw, or any policy that drops forwarded or input traffic will drop

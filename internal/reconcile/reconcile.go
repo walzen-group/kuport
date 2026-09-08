@@ -218,12 +218,13 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 	// accepting node, so the port answers wherever a routed address lands.
 	if contains(m.programmers, this) {
 		// Where the request goes next. A pod on this node is translated
-		// straight to, as is a remote pod under Single, which reaches it over
-		// the CNI's tunnel. Under Multi a remote pod is translated to the far
-		// end of this node's own return link instead: the target then sees the
-		// request arrive on a device that names which node forwarded it, which
-		// is the one thing the CNI's tunnel cannot carry. See
-		// docs/spec-decoupled-inbound.md.
+		// straight to. A pod elsewhere is translated to the far end of this
+		// node's own return link, so the request rides kuport's own
+		// encapsulation rather than the CNI's tunnel. The target then sees it
+		// arrive on a device that names which node forwarded it, which is what
+		// Multi needs and what the CNI's tunnel cannot carry. Both modes take
+		// this path, so neither depends on the CNI's encapsulation. See
+		// docs/datapath.md and the decision behind it in docs/decisions.md.
 		target := addr
 		exemptOif := "cilium_host"
 		var link *linkParams
@@ -234,7 +235,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 				}
 			}
 		}
-		if link != nil && servingModeOf(m.class) == v1alpha1.ServingMulti {
+		if link != nil {
 			target = link.peerEnd
 			exemptOif = link.name
 		}
@@ -297,20 +298,21 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			if !ok {
 				continue
 			}
+			// The request arrives on this peer's own link addressed to this
+			// node's end of it, which is a local address, so it is delivered
+			// here and traverses netfilter. Translating it to the pod is what
+			// the accepting node deliberately left undone. Matching the link
+			// address as well as the device keeps the rule to kuport's own
+			// traffic.
+			linkDst := lp.thisEnd
+			st.DNAT = append(st.DNAT, datapath.DNATRule{
+				Iface:   lp.name,
+				Port:    sel,
+				ToAddr:  src,
+				DstAddr: &linkDst,
+			})
+
 			if multi {
-				// The request arrives on this peer's own link addressed to
-				// this node's end of it, which is a local address, so it is
-				// delivered here and traverses netfilter. Translating it to
-				// the pod is what the accepting node deliberately left undone.
-				// Matching the link address as well as the device keeps the
-				// rule to kuport's own traffic.
-				linkDst := lp.thisEnd
-				st.DNAT = append(st.DNAT, datapath.DNATRule{
-					Iface:   lp.name,
-					Port:    sel,
-					ToAddr:  src,
-					DstAddr: &linkDst,
-				})
 				// Which peer forwarded a request is known only as it arrives,
 				// so it is written into the flow rather than derived from the
 				// packet, which carries nothing that says which.
