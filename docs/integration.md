@@ -301,7 +301,7 @@ Which fields are decisions and which are defaults:
 | ports | default 1..65535 | worth narrowing on a public class |
 | ports.reserved | default none | the admin keeps ports back; nothing else respects them |
 | namespaceSelector | policy decision | empty means every namespace may ask; on a public class that is rarely what you want |
-| returnPath.mode | decision | required; Vxlan or None |
+| returnPath.mode | decision | required; Vxlan or None. Which mappings None refuses, and the reply path that makes the refusal necessary, are in docs/spec.md under returnPath mode |
 | returnPath.vxlan.vni | default 4242 | anything that does not collide with other vxlan use on the mesh |
 | returnPath.vxlan.port | default 4790 | must differ from the CNI's 8472 |
 | returnPath.vxlan.subnet | default 169.254.77.0/24 | /31 per node pair, 128 slots; link-local space avoids route table surgery |
