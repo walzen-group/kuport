@@ -51,7 +51,10 @@ may send.
 
 - HTTP routing or TLS. An ingress controller already does that better.
 - Load balancing one port across pods on several nodes. One endpoint is chosen
-  and reprogrammed when it goes away.
+  and reprogrammed when it goes away. `servingMode: Multi` spreads the accepting
+  side rather than the serving side: every accepting node programs the mapping,
+  so a routed address survives one of them going away, and all of them forward
+  to that same one endpoint.
 - IPv6 in the first version. Every rule here is `table ip`.
 - Admission webhooks. Conflicts are reported in status; the reasoning is under
   Decisions.
@@ -120,7 +123,7 @@ spec:
 | ports.min, ports.max | int | The range a PortMap may ask for. Defaults 1, 65535. |
 | ports.reserved | list of int | Ports the admin keeps back. A PortMap naming one is rejected in status. |
 | namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
-| returnPath.mode | enum | `Vxlan` or `None`. `None` refuses any mapping whose pod is on another node. |
+| returnPath.mode | enum | `Vxlan` or `None`. `None` refuses any mapping that would need a return link. See returnPath mode below. |
 | returnPath.vxlan.vni | int | VXLAN network identifier for the links this class builds. |
 | returnPath.vxlan.port | int | UDP port for the links. Must differ from the CNI's, which is 8472 for Cilium. Default 4790. |
 | returnPath.vxlan.subnet | CIDR | Link addresses are allocated from here, a /31 per node pair (RFC 3021 point-to-point), so the default gives 128 slots. The slot for a pair is a recorded claim in status.links, not a computed hash. Default 169.254.77.0/24. |
@@ -765,6 +768,80 @@ response traffic is unaffected, since the client always goes first.
 is conntrack-based, so a reply after the entry ages out is not translated back
 and the client discards it. `Multi` extends that dependency to the pod's node
 rather than introducing a new kind of failure.
+
+### returnPath mode
+
+`Vxlan` builds the return link described under The return link. `None` builds no
+link and refuses any mapping that would need one.
+
+A mapping needs a return link when the pod sits on a node other than the one
+holding the DNAT rule. The DNAT happens on the programming node, and the
+conntrack entry that records the address the client originally dialed lives on
+that node alone. A reply leaving the pod's node by its own uplink carries the pod
+address as source, and the client discards it as spoofed. The reply has to arrive
+back at the node that translated the request, which is what the link is for.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant E as Programming node edge-a
+    participant T as Pod node worker-b
+    participant P as Pod at 10.244.18.107
+    C->>E: request: dst 203.0.113.9:3000, src 198.51.100.7
+    Note over E: kup-pre DNAT rewrites the dst to the pod address. The conntrack entry that remembers 203.0.113.9:3000 exists on edge-a and nowhere else.
+    E->>T: Cilium vxlan carries it, inner src still the client
+    T->>P: the pod reads src 198.51.100.7
+    P-->>T: reply: src 10.244.18.107:3000, dst 198.51.100.7
+    Note over T: with no return link, the default route sends the reply out worker-b's own uplink
+    T-->>C: src 10.244.18.107, an address the client never dialed
+    Note over C: discarded as spoofed, and the connection never completes
+```
+
+`None` refuses the mapping before any of that is programmed, so the port stays
+closed and the PortMap status says why.
+
+The refusal is decided from the same shared inputs on every agent. Each agent
+computes the mapping's programming nodes and compares them against the node
+holding the chosen endpoint. Under `Single` the programming set is the serving
+node alone, and the serving node is the endpoint's node whenever that node
+accepts the class. Under `Multi` the programming set is every accepting node.
+
+```mermaid
+flowchart TD
+    A["the chosen endpoint: one pod, picked identically by every agent"] --> B{"servingMode"}
+    B -- Single --> C["programming nodes: the serving node, which is the pod's node whenever that node accepts the class"]
+    B -- Multi --> D["programming nodes: every accepting node"]
+    C --> E{"does every programming node hold the chosen pod?"}
+    D --> E
+    E -- yes --> F["no return link is needed: the reply passes back through the conntrack entry that translated the request"]
+    E -- no --> G{"returnPath.mode"}
+    G -- Vxlan --> H["a link, a /31 slot and a routing table for each programming node that lacks the pod"]
+    G -- None --> I["Programmed=False with ReturnPathUnavailable, the programmer set is cleared, and no node writes a DNAT rule"]
+```
+
+| servingMode | Where the chosen pod sits | `Vxlan` | `None` |
+| --- | --- | --- | --- |
+| `Single` | on the serving node | programmed, no link built | programmed, no link built |
+| `Single` | on a node outside the class's accepting nodes | programmed, one link | refused |
+| `Multi`, one accepting node | on that node | programmed, no link built | programmed, no link built |
+| `Multi`, several accepting nodes | anywhere | programmed, one link per accepting node that lacks the pod | refused |
+
+Under `Multi` the comparison runs over every accepting node against the one
+chosen endpoint, so a class with several accepting nodes refuses every mapping
+while `None` is set. A DaemonSet does not change that outcome. There is no
+per-node endpoint choice to fall back on: chooseEndpoint returns a single pod for
+the whole mapping, which is what stops two agents from programming different
+pods, and every programming node DNATs to that one address.
+
+`None` is the setting for a class whose pods already sit on its accepting nodes,
+which under `Single` means a DaemonSet, or a workload pinned to an accepting node
+by its own scheduling constraints. Only one of a DaemonSet's pods receives
+traffic for a given mapping; the rest are there so the endpoint choice always
+finds a candidate on an accepting node. A rescheduling that moves the pod off the
+accepting set then surfaces as a refused mapping carrying ReturnPathUnavailable.
+Under `Vxlan` the same rescheduling builds a link and the mapping keeps working,
+which is the answer a class wants when pod placement is free.
 
 ## Repo layout
 
