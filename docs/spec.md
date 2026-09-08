@@ -655,13 +655,29 @@ assuming on any cluster. The agent reports the numbers it read from each node
 in the class status, `underlayMTU` and `linkMTU` on the `status.nodes` rows,
 so an operator can see the margin.
 
-Note also that Cilium sets a pod's interface MTU to the underlay MTU rather than
-50 below it, so a pod is always told 50 more than it can send between nodes. TCP
-absorbs this through packetization-layer path MTU discovery in blackhole mode.
-UDP does not, so a workload sending large datagrams needs its own send size kept
-under the real figure. That is a property of the cluster rather than of kuport,
-and it is documented here because a game server is exactly the workload that
-hits it.
+The device carries the figure as well as the status. Each link is created and
+kept at the smaller of its two ends' underlays less the encapsulation, which
+both agents read from the same two status rows, so the ends agree without
+negotiating. A peer that has written no row yet leaves the link at this node's
+own figure, and the pass after that peer's first status write shrinks it.
+Releases up to v0.3.4 left every device at the kernel's 1500, which put the
+split on the encapsulated packet after the fact and advertised a size the path
+could not carry.
+
+The link has two requirements: nothing disappears, and the device sits as close
+to the underlay as the encapsulation allows. Both hold. A datagram over the
+figure is split by the forwarding path and reassembled on the far side,
+measured on 2026-09-08 at reply sizes up to 1576 bytes, and a sender that set
+DF receives an ICMP carrying the correct MTU rather than silence.
+
+Cilium's own limit is a separate thing, and traffic through a mapping does not
+meet it. Cilium sets a pod's interface MTU to the underlay MTU rather than 50
+below, so a pod is told 50 more than it can send to a pod on another node, and
+Cilium's eBPF egress discards the excess with no signal. A mapping takes
+neither of those paths: a reply leaves the pod onto its own node's host stack,
+and an inbound packet reaches the pod through the host's forwarding path, both
+of which fragment. A workload that also talks pod to pod meets that limit
+there, and a game server is the workload that notices.
 
 ## Implementation notes
 

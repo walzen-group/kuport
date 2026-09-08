@@ -133,6 +133,7 @@ func (f fakeNetlink) AddrList(link netlink.Link, _ int) ([]netlink.Addr, error) 
 func (fakeNetlink) LinkAdd(netlink.Link) error                { return nil }
 func (fakeNetlink) LinkDel(netlink.Link) error                { return nil }
 func (fakeNetlink) LinkSetUp(netlink.Link) error              { return nil }
+func (fakeNetlink) LinkSetMTU(netlink.Link, int) error        { return nil }
 func (fakeNetlink) AddrAdd(netlink.Link, *netlink.Addr) error { return nil }
 func (fakeNetlink) RuleAdd(*netlink.Rule) error               { return nil }
 func (fakeNetlink) RuleDel(*netlink.Rule) error               { return nil }

@@ -185,8 +185,10 @@ type NodeStatus struct {
 	// +optional
 	UnderlayMTU int32 `json:"underlayMTU,omitempty"`
 
-	// UnderlayMTU minus the 50-byte VXLAN overhead. A reply larger than this
-	// cannot cross a return link.
+	// UnderlayMTU minus the 50-byte VXLAN overhead, which is what this node's
+	// own path allows. Each link device is set to the smaller of its two ends'
+	// figures, so a link to a peer with a smaller underlay carries less than
+	// this.
 	// +optional
 	LinkMTU int32 `json:"linkMTU,omitempty"`
 

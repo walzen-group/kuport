@@ -406,6 +406,7 @@ func linkDevice(lp linkParams) datapath.Link {
 		LocalAddr:  lp.localAddr,
 		RemoteAddr: lp.remoteAddr,
 		LinkAddr:   lp.linkAddr,
+		MTU:        lp.mtu,
 	}
 }
 

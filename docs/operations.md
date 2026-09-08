@@ -173,22 +173,34 @@ kubectl get portmapclass <name> -o jsonpath='{.status.nodes}'
 ```
 
 `underlayMTU` is the MTU of the interface carrying the return links, read from
-that node. `linkMTU` is that number minus 50, the VXLAN overhead. A reply
-larger than `linkMTU` cannot cross a return link.
+that node. `linkMTU` is that number minus 50, the VXLAN overhead, and it is
+what that node's own path allows.
 
-A margin of zero is not an error. On the cluster this was designed against,
-the mesh carries 1350, Cilium is configured at 1350, and a real pod-to-pod
-probe crosses at 1300; the link budget of 1350 minus 50 fits with nothing
-spare. Check your own numbers rather than assuming, because the failure mode
-is quiet: oversized datagrams vanish.
+Each link device is set to the smaller of its two ends' figures, so a link to a
+peer on a thinner underlay carries less than either node's `linkMTU` row
+suggests. Read the devices when a number has to be exact:
 
-There is a second trap the pod never sees coming. Cilium sets a pod's
-interface MTU to the underlay MTU, not 50 below it, so a pod is always told 50
-more than it can actually send between nodes. TCP absorbs this through
-packetization-layer path MTU discovery in blackhole mode. UDP does not. A
-workload sending large datagrams, and a game server is exactly that workload,
-must keep its own send size under the real figure: `linkMTU` from the class
-status is the safe ceiling.
+```sh
+ip link show type vxlan | grep kup-
+```
+
+A margin of zero is not an error. On the cluster this was designed against the
+mesh carries 1350 and every link lands on 1300.
+
+A datagram above the link figure still crosses. The forwarding path splits it
+and the far side reassembles, measured on 2026-09-08 at reply sizes up to 1576
+bytes. Fragmentation puts two packets on the wire for one and loses the whole
+datagram when either half is lost, so treat it as what keeps a mistake from
+becoming an outage rather than as a size to design for.
+
+Cilium carries a separate limit, and kuport's traffic does not meet it. Cilium
+sets a pod's interface MTU to the underlay MTU rather than 50 below, so a pod
+is told 50 more than it can send to a pod on another node, and Cilium's eBPF
+egress discards the excess with no signal. Traffic through a mapping takes
+neither of those paths: a reply leaves the pod onto its own node's host stack
+and goes out the return link, and an inbound packet reaches the pod through the
+host's forwarding path. A workload that also talks pod to pod meets the limit
+there and should keep that traffic under `linkMTU`.
 
 ## Agent lifecycle
 

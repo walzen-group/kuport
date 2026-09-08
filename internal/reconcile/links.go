@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
+	"github.com/walzen-group/kuport/internal/datapath"
 )
 
 // defaultSubnet is the class return-path subnet when none is set: 128 /31 slots.
@@ -149,6 +150,7 @@ type linkParams struct {
 	table      uint32
 	vni        uint32
 	port       uint16
+	mtu        uint32 // 0 when neither node has reported an underlay yet
 }
 
 // buildLinkParams derives the link for the pair (thisNode, peer) at a slot. It
@@ -188,7 +190,34 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 		table:      200 + uint32(slot),
 		vni:        vni + uint32(slot),
 		port:       port,
+		mtu:        linkMTUFor(class, thisNode, peer, local.Is4() && remote.Is4()),
 	}, true
+}
+
+// linkMTUFor sizes the device to the path it rides: the smaller of the two
+// nodes' underlays less the encapsulation. Each agent reads both figures from
+// the class status, so the two ends agree without exchanging anything. A peer
+// that has not reported yet leaves the link at this node's own figure, and the
+// pass that follows the peer's first status write shrinks it.
+func linkMTUFor(class *v1alpha1.PortMapClass, thisNode, peer string, outerIsV4 bool) uint32 {
+	mtu := datapath.LinkMTUBetween(
+		underlayMTUOf(class, thisNode),
+		underlayMTUOf(class, peer),
+		outerIsV4,
+	)
+	if mtu <= 0 {
+		return 0
+	}
+	return uint32(mtu)
+}
+
+// underlayMTUOf reads one node's reported underlay from the class status, or 0
+// when that node has written no row.
+func underlayMTUOf(class *v1alpha1.PortMapClass, name string) int {
+	if row := classNodeRow(class, name); row != nil {
+		return int(row.UnderlayMTU)
+	}
+	return 0
 }
 
 // vxlanParams returns the VNI and UDP port for a class's return links, with the

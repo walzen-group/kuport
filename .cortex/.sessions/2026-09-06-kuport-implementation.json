@@ -1,7 +1,7 @@
 {
   "schema": "catalyst-session/1",
   "effort": "kuport-implementation",
-  "saved_at": "2026-09-06T12:47:13Z",
+  "saved_at": "2026-09-06T14:53:56Z",
   "repo": "/home/nixos/repos/kuport",
   "herdr_version": "herdr 0.8.2",
   "workspace_id": "wB",
@@ -42,7 +42,7 @@
       "transcript": "/home/nixos/.omp/agent/sessions/-repos-kuport/2026-09-06T12-34-58-386Z_01a076b6-fad2-7565-a4b4-1994c8d103da.jsonl",
       "tab": {
         "id": "wC:tJ",
-        "label": "6"
+        "label": "2"
       },
       "pane_id": "wC:pJ",
       "workspace_id": "wC",

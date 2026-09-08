@@ -15,10 +15,37 @@ import (
 // the reconcile recognises its own links without touching anyone else's.
 const linkPrefix = "kup-"
 
-// LinkMTU returns the MTU a kuport link can carry over an underlay of the given
-// MTU. The 50 bytes are the VXLAN overhead. On the cluster this was designed
-// against the margin is exactly zero, which is why task 6 reports both numbers.
-func LinkMTU(underlay int) int { return underlay - 50 }
+// VxlanOverhead is what an encapsulated packet costs on the wire: outer IP,
+// UDP 8, VXLAN 8, and the inner Ethernet header 14. The outer header is 20
+// bytes over IPv4 and 40 over IPv6, so the two families differ by 20.
+func VxlanOverhead(outerIsV4 bool) int {
+	if outerIsV4 {
+		return 50
+	}
+	return 70
+}
+
+// LinkMTU returns the MTU a kuport link can carry over an IPv4 underlay of the
+// given MTU. A link between two nodes takes the smaller of the two underlays,
+// which LinkMTUBetween computes; this one reports a single node's own figure
+// for its class status row.
+func LinkMTU(underlay int) int { return underlay - VxlanOverhead(true) }
+
+// LinkMTUBetween is the MTU for a link between two nodes: the smaller of the
+// two underlays less the encapsulation. A peer whose underlay is not known yet
+// contributes nothing, so the link starts at this node's own figure and shrinks
+// on a later pass once the peer's status row lands. Both ends converge on the
+// same number because both read the same two rows.
+func LinkMTUBetween(thisUnderlay, peerUnderlay int, outerIsV4 bool) int {
+	u := thisUnderlay
+	if peerUnderlay > 0 && peerUnderlay < u {
+		u = peerUnderlay
+	}
+	if u <= 0 {
+		return 0
+	}
+	return u - VxlanOverhead(outerIsV4)
+}
 
 // InterfaceMTU reads an interface's MTU through netlink.
 func InterfaceMTU(nl NetlinkConn, name string) (int, error) {
@@ -113,7 +140,7 @@ func unmap(ip net.IP) (netip.Addr, bool) {
 // accepts, so no key material is involved.
 func vxlanFor(l Link) *netlink.Vxlan {
 	return &netlink.Vxlan{
-		LinkAttrs: netlink.LinkAttrs{Name: l.Name},
+		LinkAttrs: netlink.LinkAttrs{Name: l.Name, MTU: int(l.MTU)},
 		VxlanId:   int(l.VNI),
 		SrcAddr:   l.LocalAddr.AsSlice(),
 		Group:     l.RemoteAddr.AsSlice(),
@@ -231,6 +258,19 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 			if err := nl.AddrAdd(existing, addr); err != nil {
 				return fmt.Errorf("address %s on link %s: %w", l.LinkAddr, l.Name, err)
 			}
+		}
+		// The device carries real payload, so its MTU decides where an
+		// oversized packet is split. Left at the kernel's 1500 over a smaller
+		// underlay, the split happens to the encapsulated packet after the
+		// fact; set to the figure the underlay allows, the forwarding path
+		// splits the inner packet instead and reports the true size to
+		// anything doing path MTU discovery. The kernel takes this on a live
+		// vxlan, so it needs no rebuild.
+		if l.MTU > 0 && existing.Attrs().MTU != int(l.MTU) {
+			if err := nl.LinkSetMTU(existing, int(l.MTU)); err != nil {
+				return fmt.Errorf("set mtu %d on link %s: %w", l.MTU, l.Name, err)
+			}
+			existing.Attrs().MTU = int(l.MTU)
 		}
 		if existing.Attrs().Flags&net.FlagUp == 0 {
 			if err := nl.LinkSetUp(existing); err != nil {
@@ -468,6 +508,10 @@ func (realNetlink) LinkList() ([]netlink.Link, error)            { return netlin
 func (realNetlink) LinkAdd(link netlink.Link) error              { return netlink.LinkAdd(link) }
 func (realNetlink) LinkDel(link netlink.Link) error              { return netlink.LinkDel(link) }
 func (realNetlink) LinkSetUp(link netlink.Link) error            { return netlink.LinkSetUp(link) }
+
+func (realNetlink) LinkSetMTU(link netlink.Link, mtu int) error {
+	return netlink.LinkSetMTU(link, mtu)
+}
 
 // LinkSetUnderlay retargets an existing VXLAN's endpoints with the smallest
 // netlink message the kernel accepts on a running device: an RTM_NEWLINK

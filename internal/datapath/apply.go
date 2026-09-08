@@ -34,6 +34,7 @@ type NetlinkConn interface {
 	LinkAdd(link netlink.Link) error
 	LinkDel(link netlink.Link) error
 	LinkSetUp(link netlink.Link) error
+	LinkSetMTU(link netlink.Link, mtu int) error
 	AddrAdd(link netlink.Link, addr *netlink.Addr) error
 	AddrList(link netlink.Link, family int) ([]netlink.Addr, error)
 	RuleAdd(rule *netlink.Rule) error

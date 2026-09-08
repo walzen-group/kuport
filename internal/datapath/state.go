@@ -78,6 +78,7 @@ type Link struct {
 	LocalAddr  netip.Addr
 	RemoteAddr netip.Addr
 	LinkAddr   netip.Prefix // this node's end, a /31
+	MTU        uint32       // 0 leaves the device at the kernel default
 }
 
 type IPRule struct {

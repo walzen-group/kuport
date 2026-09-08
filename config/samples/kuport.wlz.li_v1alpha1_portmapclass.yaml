@@ -24,7 +24,9 @@ spec:
 # Each node names its own NICs, so one class covers a worker whose LAN
 # interface is enp1s0 and one whose is eth0. A PortMap asking for
 # [wt0, enp1s0, eth0] binds wt0 on both, enp1s0 on worker-1, eth0 on worker-2.
-# returnPath.mode None: a DaemonSet workload has a pod on every accepting node.
+# returnPath must be Vxlan under Multi with two accepting nodes: the one chosen
+# pod cannot sit on both, so mode None would refuse every mapping here. mode
+# None suits a Single class whose pods already sit on its accepting nodes.
 apiVersion: kuport.wlz.li/v1alpha1
 kind: PortMapClass
 metadata:

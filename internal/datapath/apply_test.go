@@ -79,6 +79,12 @@ func (f *fakeNL) LinkSetUp(link netlink.Link) error {
 	return nil
 }
 
+func (f *fakeNL) LinkSetMTU(link netlink.Link, mtu int) error {
+	f.muts++
+	link.Attrs().MTU = mtu
+	return nil
+}
+
 // LinkSetUnderlay re-points the stored VXLAN in place: same object, same
 // index, endpoints moved — mirroring the kernel's live-retarget path.
 func (f *fakeNL) LinkSetUnderlay(idx int, name string, local, remote net.IP) error {
