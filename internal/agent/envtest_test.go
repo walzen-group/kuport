@@ -66,9 +66,14 @@ func TestEnvtestClassStatus(t *testing.T) {
 		t.Fatalf("create class: %v", err)
 	}
 
+	// A port collision is the one host condition that still refuses a class. The
+	// CNI's routing mode was a second until v0.4.0, when both legs moved onto
+	// kuport's own link and the mode stopped deciding anything, so tunnelOK is
+	// false here and no longer changes the verdict.
 	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{}}
 	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{Name: "a", Ready: true}}
-	if err := r.writeClass(ctx, "public", contrib, hostState{tunnelKnown: true, tunnelOK: false, underlayMTU: 1350, linkMTU: 1300}); err != nil {
+	hs := hostState{tunnelKnown: true, tunnelOK: false, cniPort: 4790, underlayMTU: 1350, linkMTU: 1300}
+	if err := r.writeClass(ctx, "public", contrib, hs); err != nil {
 		t.Fatalf("writeClass: %v", err)
 	}
 
@@ -80,8 +85,8 @@ func TestEnvtestClassStatus(t *testing.T) {
 		t.Error("node row a not persisted")
 	}
 	ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
-	if ready == nil || ready.Reason != v1alpha1.ReasonTunnelModeRequired {
-		t.Errorf("Ready condition = %v, want TunnelModeRequired overlay", ready)
+	if ready == nil || ready.Reason != v1alpha1.ReasonVxlanPortConflict {
+		t.Errorf("Ready condition = %v, want VxlanPortConflict overlay", ready)
 	}
 }
 
