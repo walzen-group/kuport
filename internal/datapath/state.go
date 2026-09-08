@@ -24,11 +24,16 @@ type PortSel struct {
 	Last  uint16
 }
 
-// DNATRule runs on an accepting node: one per class interface per mapping.
+// DNATRule rewrites a destination. On an accepting node there is one per class
+// interface per mapping, translating to whatever carries the request onward.
+// On a target node under Multi serving there is one per return link,
+// translating a request that arrived over that link to the local pod, and
+// DstAddr is what keeps it from catching anything else on the device.
 type DNATRule struct {
-	Iface  string
-	Port   PortSel
-	ToAddr netip.Addr
+	Iface   string
+	Port    PortSel
+	ToAddr  netip.Addr
+	DstAddr *netip.Addr // ip daddr match; nil means none
 }
 
 // ExemptRule is an identity SNAT that claims the connection before the CNI's

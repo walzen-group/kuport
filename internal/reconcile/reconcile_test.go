@@ -620,15 +620,55 @@ func multiWorld(runOn string, opts ...classOpt) Inputs {
 // virtual address may land on any accepting node, so every one of them must
 // carry the DNAT rules rather than only the serving node.
 func TestMultiServingEveryAcceptingNodeForwards(t *testing.T) {
-	for _, n := range []string{"node-a", "node-b", "node-c"} {
+	// A node holding no pod translates to the far end of its own return link,
+	// so the target learns which node forwarded from the device the request
+	// arrives on. The CNI's tunnel carries nothing that says which.
+	for _, n := range []string{"node-a", "node-b"} {
 		res := Compute(multiWorld(n))
 		if len(res.State.DNAT) != 1 {
 			t.Errorf("%s: DNAT = %+v, want one rule (every accepting node forwards)", n, res.State.DNAT)
 			continue
 		}
-		if got := res.State.DNAT[0].ToAddr.String(); got != "10.244.9.9" {
-			t.Errorf("%s: DNAT target = %s, want the chosen pod 10.244.9.9", n, got)
+		if len(res.State.Links) != 1 {
+			t.Fatalf("%s: Links = %+v, want the one return link the DNAT points at", n, res.State.Links)
 		}
+		got := res.State.DNAT[0].ToAddr
+		if got.String() == "10.244.9.9" {
+			t.Errorf("%s: DNAT still points at the pod, which the CNI's tunnel cannot attribute", n)
+		}
+		if !got.IsLinkLocalUnicast() {
+			t.Errorf("%s: DNAT target = %s, want the peer's end of the return link", n, got)
+		}
+		// The two ends of a /31 differ in the low bit alone.
+		mine := res.State.Links[0].LinkAddr.Addr()
+		if got != mine.Next() && got != mine.Prev() {
+			t.Errorf("%s: DNAT target = %s, want the far end of %s", n, got, res.State.Links[0].LinkAddr)
+		}
+	}
+
+	// The pod's node translates its own interfaces straight to the pod, and
+	// translates each link to the pod as well, so a forwarded request lands.
+	res := Compute(multiWorld("node-c"))
+	if len(res.State.DNAT) != 3 {
+		t.Fatalf("node-c: DNAT = %+v, want its own interface plus one per return link", res.State.DNAT)
+	}
+	viaLink := 0
+	for _, d := range res.State.DNAT {
+		if d.ToAddr.String() != "10.244.9.9" {
+			t.Errorf("node-c: DNAT target = %s, want the pod 10.244.9.9", d.ToAddr)
+		}
+		if d.DstAddr == nil {
+			continue
+		}
+		viaLink++
+		// A link rule matches this node's own end of that link, which keeps it
+		// off anything else that arrives on the device.
+		if !d.DstAddr.IsLinkLocalUnicast() {
+			t.Errorf("node-c: link DNAT matches %s, want this node's link address", d.DstAddr)
+		}
+	}
+	if viaLink != 2 {
+		t.Errorf("node-c: %d link-matched DNAT rules, want one per remote programmer", viaLink)
 	}
 }
 

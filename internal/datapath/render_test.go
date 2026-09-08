@@ -80,7 +80,16 @@ func cases() []dpCase {
 	// its request arrived on.
 	secondAccept := netip.MustParseAddr("203.0.113.10")
 	secondCIDR := netip.MustParsePrefix("203.0.113.10/32")
+	// Under Multi the request arrives over the forwarding node's own link,
+	// addressed to this node's end of it, so this node translates it the rest
+	// of the way. The daddr match holds each rule to its own link.
+	multiLinkDstA := netip.MustParseAddr("169.254.77.1")
+	multiLinkDstB := netip.MustParseAddr("169.254.77.3")
 	targetRemoteMulti := State{
+		DNAT: []DNATRule{
+			{Iface: "kup-da0d9a1d", Port: udp3000, ToAddr: pod, DstAddr: &multiLinkDstA},
+			{Iface: "kup-e5b1c204", Port: udp3000, ToAddr: pod, DstAddr: &multiLinkDstB},
+		},
 		Exempt: []ExemptRule{
 			{OifName: "cilium_*", Negate: true, SrcAddr: &src, Port: udp3000, PortIsSrc: true},
 		},
@@ -121,7 +130,7 @@ func cases() []dpCase {
 		{name: "accepting-single-port", state: accepting(udp3000), wantDNAT: 2, wantExempt: 1},
 		{name: "accepting-port-range", state: accepting(udpRange), wantDNAT: 2, wantExempt: 1},
 		{name: "target-remote", state: targetRemote, wantExempt: 1, wantMark: 1, wantLinks: 1, wantRules: 2, wantRoutes: 1},
-		{name: "target-remote-multi", state: targetRemoteMulti, wantExempt: 1, wantCtSave: 2, wantCtLoad: 1, wantLinks: 2, wantRules: 4, wantRoutes: 2},
+		{name: "target-remote-multi", state: targetRemoteMulti, wantDNAT: 2, wantExempt: 1, wantCtSave: 2, wantCtLoad: 1, wantLinks: 2, wantRules: 4, wantRoutes: 2},
 		// same-node: pod is on the accepting node, so DNAT straight to it with
 		// no return-path machinery. A packet is DNATed once per hook, so this is
 		// a real correctness check, not filler.

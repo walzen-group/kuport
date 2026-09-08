@@ -99,6 +99,7 @@ func Render(s State) Plan {
 			Chain:   ChainPre,
 			Kind:    KindDNAT,
 			IifName: d.Iface,
+			DstAddr: d.DstAddr,
 			Port:    d.Port,
 			ToAddr:  d.ToAddr,
 		})

@@ -1,6 +1,8 @@
 table ip kuport {
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 10; policy accept;
+		iifname "kup-da0d9a1d" ip daddr 169.254.77.1 udp dport 3000 counter dnat to 10.244.18.107:3000
+		iifname "kup-e5b1c204" ip daddr 169.254.77.3 udp dport 3000 counter dnat to 10.244.18.107:3000
 	}
 	chain kup-post {
 		type nat hook postrouting priority srcnat - 10; policy accept;
