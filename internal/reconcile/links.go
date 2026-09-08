@@ -285,23 +285,44 @@ func sortedPair(a, b string) [2]string {
 // sets it once to now; a pair unused for more than 24h is dropped. Any selecting
 // agent may run this; the write conflicts sort themselves out.
 func gcClaims(class *v1alpha1.PortMapClass, needed map[string]neededPair, now metav1.Time) (updates []v1alpha1.LinkAllocation, drops []string) {
+	subnet, subnetErr := parseClassSubnet(class)
+
 	for i := range class.Status.Links {
 		la := class.Status.Links[i]
 		_, isNeeded := needed[la.Key]
+
+		if !isNeeded && la.UnusedSince != nil && now.Sub(la.UnusedSince.Time) > 24*time.Hour {
+			drops = append(drops, la.Key)
+			continue
+		}
+
+		cp := la
+		changed := false
+
 		switch {
-		case isNeeded:
-			if la.UnusedSince != nil {
-				cp := la
-				cp.UnusedSince = nil
-				updates = append(updates, cp)
-			}
-		case la.UnusedSince == nil:
-			cp := la
+		case isNeeded && la.UnusedSince != nil:
+			cp.UnusedSince = nil
+			changed = true
+		case !isNeeded && la.UnusedSince == nil:
 			t := now
 			cp.UnusedSince = &t
+			changed = true
+		}
+
+		// A link's addresses are derived from the class subnet and the slot
+		// every pass, never read back from here, so changing the subnet leaves
+		// this field naming a /31 nothing carries. A claim keeps its slot, so
+		// correcting the text is the whole repair.
+		if subnetErr == nil && int(la.Slot) >= 0 && int(la.Slot) < slotCount(subnet) {
+			lo, _ := nthSlash31(subnet, int(la.Slot))
+			if want := netip.PrefixFrom(lo, 31).String(); want != cp.Subnet {
+				cp.Subnet = want
+				changed = true
+			}
+		}
+
+		if changed {
 			updates = append(updates, cp)
-		case now.Sub(la.UnusedSince.Time) > 24*time.Hour:
-			drops = append(drops, la.Key)
 		}
 	}
 	sort.Slice(updates, func(i, j int) bool { return updates[i].Key < updates[j].Key })

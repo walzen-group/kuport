@@ -193,4 +193,49 @@ func TestLinkNameIsPerClass(t *testing.T) {
 	}
 }
 
+// TestGCClaimsCorrectsStaleSubnet: a claim keeps its slot for the life of the
+// pair, and the link addresses are derived from the class subnet and that slot
+// every pass. Changing the subnet therefore leaves the recorded text naming a
+// /31 nothing carries, which reads as a link that does not exist.
+func TestGCClaimsCorrectsStaleSubnet(t *testing.T) {
+	cls := class("public", []string{"node-a"},
+		withSubnet("169.254.79.0/24"),
+		withLinks(claim("node-a", "node-b", 1)), // claim() records 169.254.77.0/31
+	)
+	needed := map[string]neededPair{
+		pairKey("node-a", "node-b"): {key: pairKey("node-a", "node-b")},
+	}
+
+	updates, drops := gcClaims(cls, needed, metav1.NewTime(baseTime))
+	if len(drops) != 0 {
+		t.Fatalf("drops = %v, want none for a needed pair", drops)
+	}
+	if len(updates) != 1 {
+		t.Fatalf("updates = %+v, want the claim rewritten", updates)
+	}
+	// Slot 1 of 169.254.79.0/24 is the second /31.
+	if got, want := updates[0].Subnet, "169.254.79.2/31"; got != want {
+		t.Errorf("subnet = %s, want %s", got, want)
+	}
+	if updates[0].Slot != 1 {
+		t.Errorf("slot = %d, want 1 kept; only the text was wrong", updates[0].Slot)
+	}
+}
+
+// TestGCClaimsLeavesACorrectSubnetAlone keeps the pass idempotent: rewriting a
+// claim that already reads correctly would write to the API every reconcile.
+func TestGCClaimsLeavesACorrectSubnetAlone(t *testing.T) {
+	cls := class("public", []string{"node-a"},
+		withLinks(claim("node-a", "node-b", 0)), // 169.254.77.0/31, the default subnet's slot 0
+	)
+	needed := map[string]neededPair{
+		pairKey("node-a", "node-b"): {key: pairKey("node-a", "node-b")},
+	}
+
+	updates, _ := gcClaims(cls, needed, metav1.NewTime(baseTime))
+	if len(updates) != 0 {
+		t.Errorf("updates = %+v, want none when nothing changed", updates)
+	}
+}
+
 var in0now = metav1.NewTime(baseTime)
