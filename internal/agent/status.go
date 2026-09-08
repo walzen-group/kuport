@@ -195,6 +195,15 @@ func mergeClaim(links *[]v1alpha1.LinkAllocation, claim v1alpha1.LinkAllocation)
 			if (*links)[i].UnusedSince != nil {
 				(*links)[i].UnusedSince = nil
 			}
+			// The slot is the claim's identity and never moves, so it is not
+			// adopted from a proposal. The subnet is text derived from the
+			// class subnet and that slot, so a correction computed against the
+			// current class is taken here. Without it the recorded /31 goes on
+			// naming an address the link stopped carrying the moment an admin
+			// changed the class subnet.
+			if claim.Subnet != "" && (*links)[i].Slot == claim.Slot {
+				(*links)[i].Subnet = claim.Subnet
+			}
 			return
 		}
 	}

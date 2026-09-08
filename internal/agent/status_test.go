@@ -18,6 +18,46 @@ import (
 	kreconcile "github.com/walzen-group/kuport/internal/reconcile"
 )
 
+// TestMergeClaimAdoptsACorrectedSubnet: an existing claim keeps its slot and
+// its identity, and the recorded subnet is text derived from the class subnet
+// and that slot. Compute rewrites it when a class's subnet changes, so the
+// merge has to take it; returning early on the key alone silently discarded the
+// correction and the status went on naming a /31 the link no longer carried.
+func TestMergeClaimAdoptsACorrectedSubnet(t *testing.T) {
+	links := []v1alpha1.LinkAllocation{
+		{Key: "node-a/node-b", Slot: 1, Subnet: "169.254.77.2/31"},
+	}
+	mergeClaim(&links, v1alpha1.LinkAllocation{
+		Key: "node-a/node-b", Slot: 1, Subnet: "169.254.79.2/31",
+	})
+
+	if len(links) != 1 {
+		t.Fatalf("links = %+v, want the existing claim kept, not a second one", links)
+	}
+	if got, want := links[0].Subnet, "169.254.79.2/31"; got != want {
+		t.Errorf("subnet = %s, want %s", got, want)
+	}
+	if links[0].Slot != 1 {
+		t.Errorf("slot = %d, want 1; the slot is the identity and never moves", links[0].Slot)
+	}
+}
+
+// TestMergeClaimKeepsSlotOnAMismatch: a proposal computed against a stale view
+// can name a different slot for the same pair. The recorded slot wins, and its
+// subnet is left alone rather than taking text derived from the wrong slot.
+func TestMergeClaimKeepsSlotOnAMismatch(t *testing.T) {
+	links := []v1alpha1.LinkAllocation{
+		{Key: "node-a/node-b", Slot: 1, Subnet: "169.254.77.2/31"},
+	}
+	mergeClaim(&links, v1alpha1.LinkAllocation{
+		Key: "node-a/node-b", Slot: 5, Subnet: "169.254.77.10/31",
+	})
+
+	if links[0].Slot != 1 || links[0].Subnet != "169.254.77.2/31" {
+		t.Errorf("claim = %+v, want slot 1 and its own subnet untouched", links[0])
+	}
+}
+
 func vxlanClass(name string, port int32) *v1alpha1.PortMapClass {
 	c := &v1alpha1.PortMapClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
