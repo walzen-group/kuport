@@ -174,3 +174,72 @@ written.
 Two smaller ones follow it: whether the CNI masquerades traffic leaving a node
 on a `kup` device, which would rewrite the client's source, and whether the
 link MTU change is sufficient for a full-size payload.
+
+## Decisions
+
+Recorded so they are not relitigated. The admin made each one; the reasoning
+is theirs, restated here.
+
+**Build this rather than withdraw servingMode.** `Multi` as released in v0.3.0
+through v0.3.4 cannot serve a cross-node mapping, and withdrawing it was
+offered. The admin chose to decouple the inbound leg instead, because it makes
+`Multi` work as originally specified rather than narrowing it.
+
+**Multi keeps one globally chosen endpoint.** A node-local endpoint choice was
+proposed, where each accepting node serves a pod on itself. It makes a
+workload with a pod on every accepting node work today with no datapath
+change, and it was rejected: the target case is one Postgres primary behind a
+routed address, which a node-local choice does not serve. `chooseEndpoint`
+stays a single shared computation.
+
+**No virtual-address mode.** When it looked as though only direct server
+return could work, the feature was going to become a VIP mode with the address
+declared on the class. That is unnecessary under this design, because the
+identity comes from the arrival interface rather than from a declared address.
+A routed virtual address is a way of reaching the accepting set, not a mode.
+
+**rp_filter stays as it is.** Loosening it on the pod's node was proposed when
+the design still routed a pod-addressed request over the link, and the admin
+rejected weakening source validation. It was then measured at 0 on every
+device of a worker, so the question is moot for now. This design does not
+depend on it: the request is addressed to the node rather than to a pod.
+
+**Carrying the request on kuport's link is acceptable.** The objection raised
+against it was that kuport would stop riding the CNI and become an overlay of
+its own, against the non-goal in spec.md. The admin observed that the reply
+already bypasses the CNI and has since the return path was built, so this
+makes an existing asymmetry symmetric rather than crossing a new line.
+
+**Supporting other CNIs is not in scope.** The dependency is removed as a
+consequence, and that is recorded above. Building and testing against other
+CNIs, with their parameters and priorities, is separate work nobody has asked
+for.
+
+## State at handoff
+
+**Released.** v0.3.0 introduced per-node class interfaces, the PortMap
+interface list, and `servingMode`. v0.3.1 gave each return link a VNI derived
+from its slot, because the kernel keys a vxlan device by VNI and port and
+refused the second link on a node. v0.3.2 put the class name in the link
+device name, because two classes over one node pair collided on it and parked
+a DaemonSet rollout. v0.3.3 and v0.3.4 correct a claim's recorded subnet when
+a class's subnet changes, the second because the merge discarded the first's
+correction. Everything except `servingMode` is working and tested on the
+cluster.
+
+**Latent bug.** The `kup` devices are created at MTU 1500 while the path under
+them is 1350. Invisible today because they carry only small replies.
+
+**Test cluster.** kuport v0.3.4 is installed. Four mappings exist: `udp-echo`
+on 33333 and `udp-echo-edge` on 33334 under the `public` class, both Single
+and both working; `udp-echo-single` on 33335 under `test-single`, Single,
+cross-node, working; `udp-echo-multi` on 33336 under `test-multi`, Multi,
+working same-node and failing cross-node, which is the subject of this
+document. `test-single` and `test-multi` carry their own VNI and subnet,
+because slots are numbered per class and two classes sharing a node would
+otherwise collide.
+
+The echo fixture's responder was losing replies under `socat -T 5`, which
+looked like a kuport fault for some hours. It runs at `-T 30` with `-d -d`
+now. That change is in the cluster repo and uncommitted, along with the test
+units and class definitions.
