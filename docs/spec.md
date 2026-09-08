@@ -54,7 +54,9 @@ may send.
   and reprogrammed when it goes away. `servingMode: Multi` spreads the accepting
   side rather than the serving side: every accepting node programs the mapping,
   so a routed address survives one of them going away, and all of them forward
-  to that same one endpoint.
+  to that same one endpoint. The chosen endpoint is reprogrammed when it goes
+  away in either mode, so the serving side fails over; what `Multi` adds is that
+  the address clients dial stops moving with it.
 - IPv6 in the first version. Every rule here is `table ip`.
 - Admission webhooks. Conflicts are reported in status; the reasoning is under
   Decisions.
