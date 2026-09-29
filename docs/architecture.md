@@ -44,7 +44,8 @@ the objects this node owns.
 
 Resolution:
 
-1. Resolve serviceRef to the ready IPv4 endpoints of the named port.
+1. Resolve serviceRef to the ready IPv4 endpoints of the named port, each with
+   the number the EndpointSlice lists for it: the port the pod receives on.
 2. Choose one. Candidates on an accepting node rank above all others, ordered by
    accepting-node name and then by pod name within a node; with no candidate on
    an accepting node, the ready candidate with the smallest pod name wins. No
@@ -59,8 +60,8 @@ writing status. [Serving modes](datapath.md#serving-modes) has the difference.
 Emission on a node that accepts the mapping:
 
 1. A DNAT rule per interface in the class. A pod on this node is translated
-   straight to; a pod elsewhere is translated to the far end of this node's own
-   return link.
+   straight to, on the pod's port; a pod elsewhere is translated to the far end
+   of this node's own return link, keeping the port the client dialed.
 2. The masquerade exemption for the inbound leg, following the device the packet
    leaves by.
 3. When the chosen pod is on another node, this end of the return link, once its
@@ -69,7 +70,8 @@ Emission on a node that accepts the mapping:
 Emission on the node holding the chosen pod, when another node forwards to it:
 
 1. This end of each return link.
-2. A DNAT rule per link, completing the translation to the pod.
+2. A DNAT rule per link, completing the translation to the pod's address and
+   port.
 3. The return marking, the routing rules and the table entries.
 4. The masquerade exemption for the reply.
 

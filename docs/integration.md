@@ -348,7 +348,11 @@ spec:
 `endPort` opens the inclusive range 3000-3009 as one mapping; omit it for one
 port. The Service may be any type, ClusterIP included. It exists so the agent
 has endpoints to follow and a named port to resolve, and kuport never
-modifies it. The port name (`game`) is what `serviceRef.port` matches.
+modifies it. The port name (`game`) is what `serviceRef.port` matches. A
+single-port mapping delivers to the number the EndpointSlice lists under that
+name, so a client can dial one port and reach the pod on another;
+[api.md](api.md#port-translation) shows the rules. A range delivers each port
+as dialed and needs the pod listening on those numbers.
 
 ## Verifying the install
 

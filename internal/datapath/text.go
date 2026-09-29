@@ -59,7 +59,11 @@ func nftText(r Rule) string {
 
 	switch r.Kind {
 	case KindDNAT:
-		fmt.Fprintf(&b, "counter dnat to %s:%s", r.ToAddr.String(), portText(r.Port))
+		to := r.Port
+		if r.ToPort != 0 {
+			to = PortSel{Proto: r.Port.Proto, First: r.ToPort, Last: r.ToPort}
+		}
+		fmt.Fprintf(&b, "counter dnat to %s:%s", r.ToAddr.String(), portText(to))
 	case KindSNAT:
 		b.WriteString("counter snat to ip saddr")
 	case KindMark:

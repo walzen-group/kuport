@@ -24,8 +24,9 @@ type PortMapSpec struct {
 	// +kubebuilder:validation:Required
 	Protocol Protocol `json:"protocol"`
 
-	// The port clients dial on an accepting node, and the port the pod
-	// receives on. With EndPort set, the first port of an inclusive range.
+	// The port clients dial on an accepting node. The pod receives on the
+	// number serviceRef.port lists, or on this port when it lists the same one.
+	// With EndPort set, the first port of an inclusive range the pod receives as is.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
@@ -68,7 +69,8 @@ type ServiceRef struct {
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
-	// The named port on that Service.
+	// The named port on that Service. Its number in the endpoints, the pod's
+	// containerPort, is where a single-port mapping's traffic lands.
 	// +kubebuilder:validation:Required
 	Port string `json:"port"`
 }

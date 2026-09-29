@@ -88,7 +88,7 @@ func nftExprs(r Rule) []expr.Any {
 
 	switch r.Kind {
 	case KindDNAT:
-		e = append(e, dnatExprs(r.ToAddr, r.Port)...)
+		e = append(e, dnatExprs(r.ToAddr, r.Port, r.ToPort)...)
 	case KindSNAT:
 		e = append(e, snatIdentityExprs()...)
 	case KindMark:
@@ -171,9 +171,13 @@ func portMatch(p PortSel, isSrc bool) []expr.Any {
 	}}
 }
 
-// dnatExprs rewrites the destination to a pod address and port range.
-func dnatExprs(to netip.Addr, p PortSel) []expr.Any {
+// dnatExprs rewrites the destination to a pod address and port range. A
+// non-zero toPort replaces the single matched port with that port.
+func dnatExprs(to netip.Addr, p PortSel, toPort uint16) []expr.Any {
 	v4 := to.As4()
+	if toPort != 0 {
+		p = PortSel{Proto: p.Proto, First: toPort, Last: toPort}
+	}
 	out := []expr.Any{
 		&expr.Immediate{Register: 1, Data: v4[:]},
 		&expr.Immediate{Register: 2, Data: binaryutil.BigEndian.PutUint16(p.First)},

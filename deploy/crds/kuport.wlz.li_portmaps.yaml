@@ -93,8 +93,9 @@ spec:
                 type: array
               port:
                 description: |-
-                  The port clients dial on an accepting node, and the port the pod
-                  receives on. With EndPort set, the first port of an inclusive range.
+                  The port clients dial on an accepting node. The pod receives on the
+                  number serviceRef.port lists, or on this port when it lists the same one.
+                  With EndPort set, the first port of an inclusive range the pod receives as is.
                 format: int32
                 maximum: 65535
                 minimum: 1
@@ -116,7 +117,9 @@ spec:
                       kuport never modifies it.
                     type: string
                   port:
-                    description: The named port on that Service.
+                    description: |-
+                      The named port on that Service. Its number in the endpoints, the pod's
+                      containerPort, is where a single-port mapping's traffic lands.
                     type: string
                 required:
                 - name

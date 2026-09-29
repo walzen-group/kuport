@@ -35,6 +35,10 @@ const (
 	ReasonPortConflict         = "PortConflict"
 	ReasonInvalidPortRange     = "InvalidPortRange"
 	ReasonInterfaceNotInClass  = "InterfaceNotInClass"
+	// ReasonRangeTranslation: a range whose named port lists another number.
+	ReasonRangeTranslation = "RangeTranslation"
+	// ReasonTargetPortInUse: a translating mapping shares its Service port.
+	ReasonTargetPortInUse = "TargetPortInUse"
 )
 
 // PortMap Programmed reasons.

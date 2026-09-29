@@ -89,13 +89,13 @@ the packet.
 table ip kuport {
   chain kup-pre {
     type nat hook prerouting priority dstnat - 10; policy accept;
-    iifname "<iface>" <proto> dport <port> counter dnat to <target>:<port>
+    iifname "<iface>" <proto> dport <port> counter dnat to <target>:<target port>
     ...one per interface per mapping...
   }
 
   chain kup-post {
     type nat hook postrouting priority srcnat - 10; policy accept;
-    oifname "<egress dev>" ip daddr <target> <proto> dport <port> counter snat to ip saddr
+    oifname "<egress dev>" ip daddr <target> <proto> dport <target port> counter snat to ip saddr
   }
 }
 ```
@@ -103,6 +103,13 @@ table ip kuport {
 `<target>` is the pod's address when the pod is on this node, and the far end of
 this node's link to the pod's node when it is not. `<egress dev>` follows it:
 `cilium_host` for a local pod, the link device for a remote one.
+
+`<target port>` is the pod's port for a local pod: the number the EndpointSlice
+lists under `serviceRef.port`, which is `<port>` unless the mapping translates.
+Toward a link it stays `<port>`, and the pod's node writes the pod's port. The
+postrouting rule sees the packet after the DNAT, so it matches `<target port>`;
+matching `<port>` there would miss a translated packet and leave it to the CNI's
+masquerade, which replaces the client's address.
 
 A mapping with a port range renders one rule with a range match instead:
 `udp dport 27015-27115 counter dnat to 10.244.18.107:27015-27115`. The golden
@@ -136,13 +143,13 @@ masquerade rules does not break it.
 table ip kuport {
   chain kup-pre {
     type nat hook prerouting priority dstnat - 10; policy accept;
-    iifname "kup-<peer>" ip daddr <this end of that /31> <proto> dport <port> counter dnat to <pod ip>:<port>
+    iifname "kup-<peer>" ip daddr <this end of that /31> <proto> dport <port> counter dnat to <pod ip>:<pod port>
     ...one per link...
   }
 
   chain kup-post {
     type nat hook postrouting priority srcnat - 10; policy accept;
-    oifname != "cilium_*" ip saddr <pod ip> <proto> sport <port> counter snat to ip saddr
+    oifname != "cilium_*" ip saddr <pod ip> <proto> sport <pod port> counter snat to ip saddr
   }
 
   chain kup-mangle {

@@ -79,14 +79,52 @@ spec:
 | --- | --- | --- |
 | className | string | The PortMapClass this asks for. Required, immutable. |
 | protocol | enum | TCP or UDP. Required, immutable. |
-| port | int | The port clients dial on an accepting node, and the port the pod receives on. With endPort set, the first port of the range. Required, immutable. |
+| port | int | The port clients dial on an accepting node. With endPort set, the first port of the range. Required, immutable. |
 | endPort | int | Last port of an inclusive range starting at port. Omit for a single port. Immutable together with port; the API rejects endPort below port. One nftables `dport <first>-<last>` match covers a whole range. |
 | interfaces | list of string | The interfaces this mapping binds on, narrowing what the class gives each node. Empty selects every interface the class gives the node. Mutable. |
 | serviceRef.name | string | A Service in the same namespace. Required. |
-| serviceRef.port | string | The named port on that Service. Required. |
+| serviceRef.port | string | The named port on that Service. Its number in the EndpointSlice, the pod's containerPort, is the port the pod receives on. Required. |
 
 The Service may be any type, ClusterIP included. It exists so the agent has
-endpoints to follow and a named port to resolve. kuport never touches it.
+endpoints to follow and a named port to resolve. kuport never touches it, and
+reads neither its ClusterIP nor its `port` and `targetPort` numbers.
+
+### Port translation
+
+The agent sends the request to the chosen pod on the number the EndpointSlice
+lists under `serviceRef.port`. For a Service whose `http` port has
+`targetPort: http` and a pod with `containerPort: 8096` named `http`, this
+mapping answers on 10002 and delivers to 8096:
+
+```yaml
+spec:
+  className: public
+  protocol: TCP
+  port: 10002
+  serviceRef:
+    name: jellyfin
+    port: http
+```
+
+The accepting node's ruleset then carries:
+
+```
+iifname "enp1s0" tcp dport 10002 counter dnat to 10.244.17.52:8096
+oifname "cilium_host" ip daddr 10.244.17.52 tcp dport 8096 counter snat to ip saddr
+```
+
+When the pod sits on another node, the request crosses the return link on the
+port the client dialed, and the pod's node writes the new port as it writes the
+pod's address. The reply rules on the pod's node match the pod's port.
+[datapath.md](datapath.md) has the rules on each node.
+
+A mapping whose number is the same as `port` renders exactly as it did before
+translation existed. Two cases are refused with Accepted=False:
+
+| Case | Reason |
+| --- | --- |
+| a range (`endPort` set) whose named port lists a number other than `port`; a range delivers each port as dialed | RangeTranslation |
+| a second mapping on the same Service port and protocol when either of the two translates; the pod's node matches replies by pod address and port, and two mappings would write two return rules for the same replies | TargetPortInUse, naming the earlier mapping |
 
 The immutable fields are immutable because changing them is indistinguishable
 from deleting one mapping and creating another, and the reconcile is simpler if
@@ -157,7 +195,7 @@ pass.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
-| Accepted | the class exists, selects this namespace, the port range is inside the class range and unreserved, and no earlier mapping holds it | `ClassNotFound`, `NamespaceNotSelected`, `PortOutOfRange`, `PortReserved`, `PortConflict`, `InvalidPortRange` |
+| Accepted | the class exists, selects this namespace, the port range is inside the class range and unreserved, and no earlier mapping holds it | `ClassNotFound`, `NamespaceNotSelected`, `PortOutOfRange`, `PortReserved`, `PortConflict`, `InvalidPortRange`, `RangeTranslation`, `TargetPortInUse` |
 | Programmed | the serving node has written its rules and its class status row reports ready, and for a pod on another node the return link has landed with usable addresses at both ends | `NoReadyEndpoint`, `ReturnPathUnavailable`, `NodeNotReady` |
 
 `InvalidPortRange` is the ceiling on the CEL rule that endPort must not be below

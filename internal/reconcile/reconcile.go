@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -146,6 +147,9 @@ type chosenEndpoint struct {
 	node    string
 	addr    string
 	targetR string
+	// port is the number the endpoint's slice lists under serviceRef.port, the
+	// port the pod listens on. 0 when the slice gives no number.
+	port int32
 }
 
 // Compute produces the desired state and owned status for in.NodeName. It is
@@ -212,6 +216,11 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 		return
 	}
 	sel := portSel(m.pm)
+	// podSel is the port the request carries once it reaches the pod and the
+	// port the pod replies from; toPort is non-zero when that differs from sel.
+	// The port changes only at the DNAT that writes the pod's address, so a
+	// request riding a return link still carries the port the client dialed.
+	podSel, toPort := podPort(m)
 
 	// Accepting side: DNAT per interface plus the masquerade exemption, on
 	// every programmer. Under Single that is one node; under Multi it is every
@@ -235,9 +244,11 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 				}
 			}
 		}
+		targetPort, exemptSel := toPort, podSel
 		if link != nil {
 			target = link.peerEnd
 			exemptOif = link.name
+			targetPort, exemptSel = 0, sel
 		}
 
 		for _, iface := range interfacesFor(m.class, this, m.pm) {
@@ -245,14 +256,17 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 				Iface:  iface,
 				Port:   sel,
 				ToAddr: target,
+				ToPort: targetPort,
 			})
 		}
+		// postrouting sees the packet after the DNAT, so the exemption matches
+		// the port the DNAT wrote.
 		dst := target
 		st.Exempt = append(st.Exempt, datapath.ExemptRule{
 			OifName:   exemptOif,
 			Negate:    false,
 			DstAddr:   &dst,
-			Port:      sel,
+			Port:      exemptSel,
 			PortIsSrc: false,
 		})
 		// A remote pod needs the return-link device on this end, and only
@@ -273,7 +287,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			OifName:   "cilium_*",
 			Negate:    true,
 			SrcAddr:   &src,
-			Port:      sel,
+			Port:      podSel,
 			PortIsSrc: true,
 		})
 
@@ -282,7 +296,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			// One rule for every peer: the reply carries whichever mark its
 			// request stored, and a flow with no entry restores 0 and leaves
 			// by this node's own uplink.
-			st.CtLoad = append(st.CtLoad, datapath.CtLoadRule{SrcAddr: src, Port: sel})
+			st.CtLoad = append(st.CtLoad, datapath.CtLoadRule{SrcAddr: src, Port: podSel})
 		}
 
 		for _, peer := range remotePeers {
@@ -309,6 +323,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 				Iface:   lp.name,
 				Port:    sel,
 				ToAddr:  src,
+				ToPort:  toPort,
 				DstAddr: &linkDst,
 			})
 
@@ -323,7 +338,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			} else {
 				st.Mark = append(st.Mark, datapath.MarkRule{
 					SrcAddr: src,
-					Port:    sel,
+					Port:    podSel,
 					Mark:    lp.mark,
 				})
 			}
@@ -418,6 +433,23 @@ func servingRowReady(m *mapping) (string, bool) {
 		return fmt.Sprintf("serving node %s is not ready: %s", m.serving, row.Message), false
 	}
 	return "", true
+}
+
+// podPort returns the port the pod listens on for a mapping, as a PortSel, and
+// the port its DNAT translates to. A single-port mapping whose endpoint lists a
+// different number under serviceRef.port translates to that number. A range, an
+// endpoint listing the same number, and one listing none keep the matched port,
+// and toPort is 0.
+func podPort(m *mapping) (sel datapath.PortSel, toPort uint16) {
+	sel = portSel(m.pm)
+	if m.endpoint == nil || sel.First != sel.Last {
+		return sel, 0
+	}
+	p := m.endpoint.port
+	if p <= 0 || p > 65535 || p == m.pm.Spec.Port {
+		return sel, 0
+	}
+	return datapath.PortSel{Proto: sel.Proto, First: uint16(p), Last: uint16(p)}, uint16(p)
 }
 
 // portSel builds the datapath PortSel for a mapping's protocol and interval.
@@ -518,7 +550,7 @@ func selKey(p datapath.PortSel) string {
 }
 
 func dnatKey(r datapath.DNATRule) string {
-	return r.Iface + "|" + selKey(r.Port) + "|" + r.ToAddr.String()
+	return r.Iface + "|" + selKey(r.Port) + "|" + r.ToAddr.String() + "|" + strconv.Itoa(int(r.ToPort))
 }
 
 func exemptKey(r datapath.ExemptRule) string {

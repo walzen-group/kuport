@@ -120,7 +120,67 @@ func validateStandalone(in Inputs, idx *index, m *mapping) (reason, msg string, 
 			fmt.Sprintf("interface %q is on no node of class %q", iface, m.class.Name), false
 	}
 
+	// A range keeps its port numbers on the way to the pod, so a pod listing
+	// another number under the named port would get traffic it does not listen for.
+	if first != last {
+		if p, ok := differingPort(in, pm); ok {
+			return v1alpha1.ReasonRangeTranslation,
+				fmt.Sprintf("service port %s/%s is %d; a range reaches the pod on the ports it names, starting at %d",
+					pm.Spec.ServiceRef.Name, pm.Spec.ServiceRef.Port, p, first), false
+		}
+	}
+
+	// The pod's node matches replies by pod address and port. Two mappings on
+	// one Service port, one of them translating, would write two return rules
+	// for the same replies, so the earlier mapping keeps the port.
+	if other := sharedTarget(in, pm); other != nil {
+		return v1alpha1.ReasonTargetPortInUse,
+			fmt.Sprintf("service port %s/%s is already mapped by %s",
+				pm.Spec.ServiceRef.Name, pm.Spec.ServiceRef.Port, pmKey(other)), false
+	}
+
 	return v1alpha1.ReasonValid, "", true
+}
+
+// differingPort returns the first number a ready endpoint lists under the
+// mapping's named port that differs from spec.port, and whether there is one.
+func differingPort(in Inputs, pm *v1alpha1.PortMap) (int32, bool) {
+	for _, c := range gatherCandidates(in, pm) {
+		if c.port != 0 && c.port != pm.Spec.Port {
+			return c.port, true
+		}
+	}
+	return 0, false
+}
+
+// translates reports whether a mapping sends traffic to a pod port other than
+// the one the client dials: a single port whose named port lists another number.
+func translates(in Inputs, pm *v1alpha1.PortMap) bool {
+	if first, last := interval(pm); first != last {
+		return false
+	}
+	_, ok := differingPort(in, pm)
+	return ok
+}
+
+// sharedTarget returns the earliest other mapping on the same Service port and
+// protocol when either of the two translates, or nil. Two untranslated mappings
+// on one Service port are left alone, as before translation existed.
+func sharedTarget(in Inputs, pm *v1alpha1.PortMap) *v1alpha1.PortMap {
+	var found *v1alpha1.PortMap
+	for _, o := range in.PortMaps {
+		if o == pm || o.Namespace != pm.Namespace || o.Spec.Protocol != pm.Spec.Protocol ||
+			o.Spec.ServiceRef != pm.Spec.ServiceRef || !earlier(o, pm) {
+			continue
+		}
+		if !translates(in, o) && !translates(in, pm) {
+			continue
+		}
+		if found == nil || earlier(o, found) {
+			found = o
+		}
+	}
+	return found
 }
 
 // firstOverlap returns the earliest held mapping whose interval overlaps m on the

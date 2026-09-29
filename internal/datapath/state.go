@@ -33,6 +33,7 @@ type DNATRule struct {
 	Iface   string
 	Port    PortSel
 	ToAddr  netip.Addr
+	ToPort  uint16      // translated destination port; 0 keeps the matched port
 	DstAddr *netip.Addr // ip daddr match; nil means none
 }
 

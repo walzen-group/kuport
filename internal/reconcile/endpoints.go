@@ -69,7 +69,8 @@ func gatherCandidates(in Inputs, pm *v1alpha1.PortMap) []chosenEndpoint {
 		if sl.Labels[serviceNameLabel] != pm.Spec.ServiceRef.Name {
 			continue
 		}
-		if !sliceHasPort(sl, pm.Spec.ServiceRef.Port) {
+		port, ok := namedPort(sl, pm.Spec.ServiceRef.Port)
+		if !ok {
 			continue
 		}
 		for i := range sl.Endpoints {
@@ -84,20 +85,26 @@ func gatherCandidates(in Inputs, pm *v1alpha1.PortMap) []chosenEndpoint {
 				node:    strFromPtr(ep.NodeName),
 				addr:    ep.Addresses[0],
 				targetR: targetRefName(ep),
+				port:    port,
 			})
 		}
 	}
 	return out
 }
 
-// sliceHasPort reports whether an EndpointSlice serves the named port.
-func sliceHasPort(sl *discoveryv1.EndpointSlice, name string) bool {
+// namedPort returns the number an EndpointSlice lists under the named port, and
+// whether it serves that port at all. The number is 0 when the slice names the
+// port without one.
+func namedPort(sl *discoveryv1.EndpointSlice, name string) (int32, bool) {
 	for _, p := range sl.Ports {
 		if p.Name != nil && *p.Name == name {
-			return true
+			if p.Port == nil {
+				return 0, true
+			}
+			return *p.Port, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // endpointReady reports whether an endpoint is ready. A nil Ready means ready,

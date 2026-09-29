@@ -60,6 +60,7 @@ type Rule struct {
 	Port      PortSel     // matched as dport, or sport when PortIsSrc
 	PortIsSrc bool        // match source port instead of destination
 	ToAddr    netip.Addr  // KindDNAT target address
+	ToPort    uint16      // KindDNAT target port; 0 keeps the matched port
 	Mark      uint32      // KindMark value
 }
 
@@ -102,6 +103,7 @@ func Render(s State) Plan {
 			DstAddr: d.DstAddr,
 			Port:    d.Port,
 			ToAddr:  d.ToAddr,
+			ToPort:  d.ToPort,
 		})
 	}
 	for _, e := range s.Exempt {
