@@ -7,13 +7,11 @@ UDP port on one node reaches a pod on another node with the client's source
 address intact. Read docs/overview.md for why it is shaped this way; this page is
 the procedure.
 
-One fact before any step: kuport was built without access to a cluster. Its
-unit, golden and envtest suites pass locally under the project's pinned
-toolchain and run again in CI on every push; the end-to-end script the spec
-describes has not been written, because no cluster was available to write it
-against. Your cluster will be among the first. Verify each step below against
-the observable it names rather than trusting the sequence, and when something
-refuses to match, docs/troubleshooting.md is written for exactly that moment.
+kuport runs in production on its maintainers' clusters, which both use Talos
+nodes, Cilium in tunnel mode and a netbird WireGuard mesh. A cluster that
+differs from that design can fail a step the maintainers' clusters pass, so
+check each step below against the observable it names. When something refuses
+to match, docs/troubleshooting.md is written for that moment.
 
 ## Preconditions
 

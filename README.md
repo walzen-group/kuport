@@ -31,19 +31,20 @@ programs nftables and routes to make it so, and follows the pod when it moves.
 
 ## Status
 
-Built, and not yet run against a cluster. The agent, the API, the CI and the
-deploy artifacts are in this repo; the unit, golden and envtest suites pass
-locally under the pinned toolchain, and GitHub Actions runs the same tiers on
-every push. There was no test cluster while this was
-written, so the end-to-end script the spec describes has not been written
-yet: yours will be the first run of anything, on a real network. The datapath
-rules themselves were proven by hand on a live cluster before the design was
-written, and every rule in the spec names the measurement behind it, but that
-proof covers the rules, not this implementation of them.
+kuport has run on the maintainers' test and production clusters since
+September 2026. Both run Talos nodes spread across sites, joined by a netbird
+WireGuard mesh, with Cilium in tunnel mode. In production, PortMaps deliver TCP
+to Jellyfin and InfluxDB. The test cluster serves UDP to an Insurgency Sandstorm game server and
+runs the echo fixtures that cover both serving modes over TCP and UDP.
 
-If you are considering it: install on a staging cluster, walk
-[docs/integration.md](docs/integration.md) end to end, and expect to file the
-first issues.
+GitHub Actions runs the unit, golden and envtest suites on every push. The
+end-to-end tier runs by hand against the test cluster, as
+[docs/development.md](docs/development.md) describes. IPv6 delivery is new in
+v0.6.0 (released 2026-10-01), and no PortMap on either cluster uses it yet.
+
+Every cluster kuport has run on shares that one design. On a cluster built
+differently, install on a staging cluster first and walk
+[docs/integration.md](docs/integration.md) end to end.
 
 [docs/README.md](docs/README.md) indexes all of it. The ones most people want:
 
@@ -73,4 +74,4 @@ including the four cluster preconditions to check before anything installs.
 kuport is not portable to any cluster. It needs a CNI in tunnel mode, because
 the encapsulation is what carries a client address past WireGuard's source
 check, and it needs to write nftables and routes on the host. The spec lists
-each dependency and why it is load-carrying.
+each dependency and the reason kuport needs it.
