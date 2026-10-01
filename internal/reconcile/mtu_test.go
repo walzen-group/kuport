@@ -13,7 +13,7 @@ import (
 // the device keeps the kernel default until a later pass corrects it.
 func TestBuildLinkParamsMTU(t *testing.T) {
 	const a, b = "node-a", "node-b"
-	subnet := netip.MustParsePrefix("169.254.77.0/24")
+	subnet := classAlloc{subnet: netip.MustParsePrefix("169.254.77.0/24")}
 	idx := &index{nodeAddr: map[string]string{a: "10.0.0.1", b: "10.0.0.2"}}
 
 	row := func(name string, underlay int32) v1alpha1.NodeStatus {
@@ -52,7 +52,7 @@ func TestBuildLinkParamsMTU(t *testing.T) {
 // carry.
 func TestBuildLinkParamsMTUAgreesOnBothEnds(t *testing.T) {
 	const a, b = "node-a", "node-b"
-	subnet := netip.MustParsePrefix("169.254.77.0/24")
+	subnet := classAlloc{subnet: netip.MustParsePrefix("169.254.77.0/24")}
 	idx := &index{nodeAddr: map[string]string{a: "10.0.0.1", b: "10.0.0.2"}}
 	cls := class("c", []string{a, b}, withNodeRows(
 		v1alpha1.NodeStatus{Name: a, Ready: true, UnderlayMTU: 1350},

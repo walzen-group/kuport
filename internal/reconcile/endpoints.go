@@ -52,7 +52,51 @@ func chooseEndpoint(in Inputs, m *mapping) *chosenEndpoint {
 		}
 		return candidates[i].addr < candidates[j].addr
 	})
-	return &candidates[0]
+	chosen := candidates[0]
+	chosen.addr6 = pairedIPv6(in, pm, chosen)
+	return &chosen
+}
+
+// pairedIPv6 finds the chosen pod's IPv6 address in the Service's IPv6
+// EndpointSlices, which a PreferDualStack Service has beside its IPv4 ones. The
+// pod is matched by targetRef kind, namespace and name, so an IPv6 endpoint of
+// any other pod is ignored and both families always reach the same pod. It
+// returns "" when the Service has no IPv6 slice, the pod is not ready in it, or
+// the chosen endpoint carries no targetRef to match on.
+func pairedIPv6(in Inputs, pm *v1alpha1.PortMap, chosen chosenEndpoint) string {
+	if chosen.ref == nil {
+		return ""
+	}
+	var found []string
+	for _, sl := range in.Slices {
+		if sl.Namespace != pm.Namespace || sl.AddressType != discoveryv1.AddressTypeIPv6 {
+			continue
+		}
+		if sl.Labels[serviceNameLabel] != pm.Spec.ServiceRef.Name {
+			continue
+		}
+		if _, ok := namedPort(sl, pm.Spec.ServiceRef.Port); !ok {
+			continue
+		}
+		for i := range sl.Endpoints {
+			ep := &sl.Endpoints[i]
+			ref := ep.TargetRef
+			if ref == nil || ref.Kind != chosen.ref.Kind || ref.Namespace != chosen.ref.Namespace || ref.Name != chosen.ref.Name {
+				continue
+			}
+			if !endpointReady(ep) || len(ep.Addresses) == 0 {
+				continue
+			}
+			found = append(found, ep.Addresses[0])
+		}
+	}
+	// One pod has one IPv6 address; should two slices list it, the smallest
+	// keeps every agent on the same answer.
+	sort.Strings(found)
+	if len(found) == 0 {
+		return ""
+	}
+	return found[0]
 }
 
 // gatherCandidates returns every ready IPv4 endpoint behind the mapping's named
@@ -85,6 +129,7 @@ func gatherCandidates(in Inputs, pm *v1alpha1.PortMap) []chosenEndpoint {
 				node:    strFromPtr(ep.NodeName),
 				addr:    ep.Addresses[0],
 				targetR: targetRefName(ep),
+				ref:     ep.TargetRef,
 				port:    port,
 			})
 		}

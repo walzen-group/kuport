@@ -111,6 +111,15 @@ func withSubnet(cidr string) classOpt {
 	}
 }
 
+func withSubnet6(cidr string) classOpt {
+	return func(c *v1alpha1.PortMapClass) {
+		if c.Spec.ReturnPath.Vxlan == nil {
+			c.Spec.ReturnPath.Vxlan = &v1alpha1.VxlanConfig{}
+		}
+		c.Spec.ReturnPath.Vxlan.Subnet6 = cidr
+	}
+}
+
 func withLinks(links ...v1alpha1.LinkAllocation) classOpt {
 	return func(c *v1alpha1.PortMapClass) { c.Status.Links = links }
 }
@@ -191,13 +200,27 @@ func slice(namespace, serviceName string, eps ...endpointSpec) *discoveryv1.Endp
 
 // slicePort is slice with an explicit served port name.
 func slicePort(namespace, serviceName, portName string, eps ...endpointSpec) *discoveryv1.EndpointSlice {
+	return sliceOf(discoveryv1.AddressTypeIPv4, namespace, serviceName, portName, eps...)
+}
+
+// slice6 builds the IPv6 EndpointSlice a PreferDualStack Service has beside its
+// IPv4 one, serving the port name "svc".
+func slice6(namespace, serviceName string, eps ...endpointSpec) *discoveryv1.EndpointSlice {
+	return sliceOf(discoveryv1.AddressTypeIPv6, namespace, serviceName, "svc", eps...)
+}
+
+func sliceOf(at discoveryv1.AddressType, namespace, serviceName, portName string, eps ...endpointSpec) *discoveryv1.EndpointSlice {
+	name := serviceName + "-abcde"
+	if at == discoveryv1.AddressTypeIPv6 {
+		name = serviceName + "-v6xyz"
+	}
 	sl := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name:      serviceName + "-abcde",
+			Name:      name,
 			Labels:    map[string]string{serviceNameLabel: serviceName},
 		},
-		AddressType: discoveryv1.AddressTypeIPv4,
+		AddressType: at,
 		Ports:       []discoveryv1.EndpointPort{{Name: ptr(portName)}},
 	}
 	for _, e := range eps {
@@ -206,7 +229,7 @@ func slicePort(namespace, serviceName, portName string, eps ...endpointSpec) *di
 			ep.NodeName = ptr(e.node)
 		}
 		if e.target != "" {
-			ep.TargetRef = &corev1.ObjectReference{Kind: "Pod", Name: e.target}
+			ep.TargetRef = &corev1.ObjectReference{Kind: "Pod", Namespace: namespace, Name: e.target}
 		}
 		switch {
 		case e.notReady:

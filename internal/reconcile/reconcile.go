@@ -46,6 +46,16 @@ type Inputs struct {
 	// absent from the map is missing or unaddressed here: Compute reports
 	// the class's node row not-ready naming it, never a skipped row.
 	InterfaceAddrs map[string]string
+
+	// InterfaceAddrs6 resolves the same interfaces to their first global IPv6
+	// address, where they have one. An interface absent here simply has no
+	// IPv6 address; it makes no row not-ready.
+	InterfaceAddrs6 map[string]string
+
+	// IPv6Forwarding is the host's net.ipv6.conf.all.forwarding. With it off
+	// the node cannot forward an IPv6 request to a pod, so Compute emits no
+	// IPv6 objects for this node and says so in its class rows.
+	IPv6Forwarding bool
 }
 
 // Result is the desired state for this node plus the status this node is
@@ -147,9 +157,14 @@ type chosenEndpoint struct {
 	node    string
 	addr    string
 	targetR string
+	// ref is the endpoint's targetRef, which the IPv6 slice is searched by.
+	ref *corev1.ObjectReference
 	// port is the number the endpoint's slice lists under serviceRef.port, the
 	// port the pod listens on. 0 when the slice gives no number.
 	port int32
+	// addr6 is the same pod's IPv6 address, from the Service's IPv6
+	// EndpointSlice, or "" when it has none.
+	addr6 string
 }
 
 // Compute produces the desired state and owned status for in.NodeName. It is
@@ -204,17 +219,58 @@ func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, 
 		}
 		emitMapping(st, in, idx, m, alloc[m.pm.Spec.ClassName])
 	}
+	unifyLinkAddr6(st)
 	sortState(st)
 }
 
-// emitMapping emits the datapath objects this node owns for one mapping.
+// unifyLinkAddr6 gives every copy of a link the /127 when any copy has it. Each
+// mapping over a node pair emits that pair's link, and a single-stack mapping
+// emits it without IPv6; left as they are, the copies would have the apply add
+// the /127 for one and remove it for the next.
+func unifyLinkAddr6(st *datapath.State) {
+	v6 := map[string]netip.Prefix{}
+	for _, l := range st.Links {
+		if l.LinkAddr6.IsValid() {
+			v6[l.Name] = l.LinkAddr6
+		}
+	}
+	for i := range st.Links {
+		if p, ok := v6[st.Links[i].Name]; ok {
+			st.Links[i].LinkAddr6 = p
+		}
+	}
+}
+
+// podAddrs returns the chosen pod's address in each family this node delivers
+// the mapping in, IPv4 first. IPv4 is always there. IPv6 is added when the
+// Service's IPv6 slice names the same pod and this host forwards IPv6.
+func podAddrs(in Inputs, m *mapping) []netip.Addr {
+	addr, err := netip.ParseAddr(m.endpoint.addr)
+	if err != nil {
+		return nil
+	}
+	out := []netip.Addr{addr}
+	if !in.IPv6Forwarding || m.endpoint.addr6 == "" {
+		return out
+	}
+	if a6, err := netip.ParseAddr(m.endpoint.addr6); err == nil && a6.Is6() && !a6.Is4In6() {
+		out = append(out, a6)
+	}
+	return out
+}
+
+// emitMapping emits the datapath objects this node owns for one mapping, in
+// each family podAddrs returns. A rule that carries an address is written once
+// per family; the link device, the loop guard and the conntrack save rule
+// carry none of the pod's addresses and are written once.
 func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc classAlloc) {
 	this := in.NodeName
 	endpointNode := m.endpoint.node
-	addr, err := netip.ParseAddr(m.endpoint.addr)
-	if err != nil {
+	pods := podAddrs(in, m)
+	if len(pods) == 0 {
 		return
 	}
+	dual := len(pods) > 1
 	sel := portSel(m.pm)
 	// podSel is the port the request carries once it reaches the pod and the
 	// port the pod replies from; toPort is non-zero when that differs from sel.
@@ -234,46 +290,52 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 		// Multi needs and what the CNI's tunnel cannot carry. Both modes take
 		// this path, so neither depends on the CNI's encapsulation. See
 		// docs/datapath.md and the decision behind it in docs/decisions.md.
-		target := addr
-		exemptOif := "cilium_host"
 		var link *linkParams
 		if this != endpointNode {
 			if slot, ok := alloc.landedSlotFor(m, this); ok {
-				if lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, endpointNode, slot); ok {
+				if lp, ok := buildLinkParams(idx, m.class, alloc, this, endpointNode, slot); ok {
 					link = &lp
 				}
 			}
 		}
-		targetPort, exemptSel := toPort, podSel
-		if link != nil {
-			target = link.peerEnd
-			exemptOif = link.name
-			targetPort, exemptSel = 0, sel
-		}
 
-		for _, iface := range interfacesFor(m.class, this, m.pm) {
-			st.DNAT = append(st.DNAT, datapath.DNATRule{
-				Iface:  iface,
-				Port:   sel,
-				ToAddr: target,
-				ToPort: targetPort,
+		for _, pod := range pods {
+			target, exemptOif := pod, "cilium_host"
+			targetPort, exemptSel := toPort, podSel
+			if link != nil {
+				end, ok := link.peerEndFor(pod)
+				if !ok {
+					// The link carries no IPv6, so the request has no way on.
+					continue
+				}
+				target, exemptOif = end, link.name
+				targetPort, exemptSel = 0, sel
+			}
+
+			for _, iface := range interfacesFor(m.class, this, m.pm) {
+				st.DNAT = append(st.DNAT, datapath.DNATRule{
+					Iface:  iface,
+					Port:   sel,
+					ToAddr: target,
+					ToPort: targetPort,
+				})
+			}
+			// postrouting sees the packet after the DNAT, so the exemption
+			// matches the port the DNAT wrote.
+			dst := target
+			st.Exempt = append(st.Exempt, datapath.ExemptRule{
+				OifName:   exemptOif,
+				Negate:    false,
+				DstAddr:   &dst,
+				Port:      exemptSel,
+				PortIsSrc: false,
 			})
 		}
-		// postrouting sees the packet after the DNAT, so the exemption matches
-		// the port the DNAT wrote.
-		dst := target
-		st.Exempt = append(st.Exempt, datapath.ExemptRule{
-			OifName:   exemptOif,
-			Negate:    false,
-			DstAddr:   &dst,
-			Port:      exemptSel,
-			PortIsSrc: false,
-		})
 		// A remote pod needs the return-link device on this end, and only
 		// once the claim has landed: a tentative slot must not half-build a
 		// link whose mark could collide.
 		if link != nil {
-			st.Links = append(st.Links, linkDevice(*link))
+			st.Links = append(st.Links, linkDevice(*link, dual))
 		}
 	}
 
@@ -282,71 +344,118 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 	// table, because a reply has to leave by the link its request arrived on.
 	remotePeers := remoteProgrammers(m, this)
 	if this == endpointNode && len(remotePeers) > 0 {
-		src := addr
-		st.Exempt = append(st.Exempt, datapath.ExemptRule{
-			OifName:   "cilium_*",
-			Negate:    true,
-			SrcAddr:   &src,
-			Port:      podSel,
-			PortIsSrc: true,
-		})
+		// The mark carries the slot, so nothing that depends on the slot is
+		// written until the claim has landed: an unresolved slot must never
+		// become a real mark, and the divert rules and link that share the
+		// slot appear with it, atomically per pass.
+		var links []linkParams
+		for _, peer := range remotePeers {
+			slot, ok := alloc.landedSlotFor(m, peer)
+			if !ok {
+				continue
+			}
+			if lp, ok := buildLinkParams(idx, m.class, alloc, this, peer, slot); ok {
+				links = append(links, lp)
+			}
+		}
+		// The pod's replies are handled in IPv6 only when some link can carry
+		// them back.
+		targetPods := pods[:1]
+		for _, lp := range links {
+			if dual && lp.has6 {
+				targetPods = pods
+			}
+		}
+
+		for _, pod := range targetPods {
+			src := pod
+			st.Exempt = append(st.Exempt, datapath.ExemptRule{
+				OifName:   "cilium_*",
+				Negate:    true,
+				SrcAddr:   &src,
+				Port:      podSel,
+				PortIsSrc: true,
+			})
+		}
 
 		multi := servingModeOf(m.class) == v1alpha1.ServingMulti
 		if multi {
 			// One rule for every peer: the reply carries whichever mark its
 			// request stored, and a flow with no entry restores 0 and leaves
 			// by this node's own uplink.
-			st.CtLoad = append(st.CtLoad, datapath.CtLoadRule{SrcAddr: src, Port: podSel})
+			for _, pod := range targetPods {
+				st.CtLoad = append(st.CtLoad, datapath.CtLoadRule{SrcAddr: pod, Port: podSel})
+			}
 		}
 
-		for _, peer := range remotePeers {
-			// The mark carries the slot, so nothing that depends on the slot is
-			// written until the claim has landed: an unresolved slot must never
-			// become a real mark, and the divert rules and link that share the
-			// slot appear with it, atomically per pass.
-			slot, ok := alloc.landedSlotFor(m, peer)
-			if !ok {
-				continue
+		for _, lp := range links {
+			for _, pod := range targetPods {
+				// The request arrives on this peer's own link addressed to
+				// this node's end of it, which is a local address, so it is
+				// delivered here and traverses netfilter. Translating it to
+				// the pod is what the accepting node deliberately left undone.
+				// Matching the link address as well as the device keeps the
+				// rule to kuport's own traffic.
+				linkDst, ok := lp.thisEndFor(pod)
+				if !ok {
+					continue
+				}
+				st.DNAT = append(st.DNAT, datapath.DNATRule{
+					Iface:   lp.name,
+					Port:    sel,
+					ToAddr:  pod,
+					ToPort:  toPort,
+					DstAddr: &linkDst,
+				})
+				if !multi {
+					st.Mark = append(st.Mark, datapath.MarkRule{
+						SrcAddr: pod,
+						Port:    podSel,
+						Mark:    lp.mark,
+					})
+				}
 			}
-			lp, ok := buildLinkParams(idx, m.class, alloc.subnet, this, peer, slot)
-			if !ok {
-				continue
-			}
-			// The request arrives on this peer's own link addressed to this
-			// node's end of it, which is a local address, so it is delivered
-			// here and traverses netfilter. Translating it to the pod is what
-			// the accepting node deliberately left undone. Matching the link
-			// address as well as the device keeps the rule to kuport's own
-			// traffic.
-			linkDst := lp.thisEnd
-			st.DNAT = append(st.DNAT, datapath.DNATRule{
-				Iface:   lp.name,
-				Port:    sel,
-				ToAddr:  src,
-				ToPort:  toPort,
-				DstAddr: &linkDst,
-			})
 
 			if multi {
 				// Which peer forwarded a request is known only as it arrives,
 				// so it is written into the flow rather than derived from the
-				// packet, which carries nothing that says which.
+				// packet, which carries nothing that says which. The rule
+				// matches the link alone, so one covers both families.
 				st.CtSave = append(st.CtSave, datapath.CtSaveRule{
 					Iface: lp.name,
 					Mark:  lp.mark,
 				})
-			} else {
-				st.Mark = append(st.Mark, datapath.MarkRule{
-					SrcAddr: src,
-					Port:    podSel,
-					Mark:    lp.mark,
-				})
 			}
-			st.Links = append(st.Links, linkDevice(lp))
-			st.Rules = append(st.Rules, loopGuardRule(lp), divertRule(lp))
-			st.Routes = append(st.Routes, returnRoute(lp))
+			st.Links = append(st.Links, linkDevice(lp, dual))
+			st.Rules = append(st.Rules, loopGuardRule(lp), divertRule(lp, datapath.FamilyIPv4))
+			st.Routes = append(st.Routes, returnRoute(lp, datapath.FamilyIPv4))
+			// The same mark and table in IPv6, and the table's IPv6 route.
+			// The loop guard has no IPv6 twin: the outer packet the vxlan
+			// driver builds is IPv4 whatever it carries.
+			if dual && lp.has6 {
+				st.Rules = append(st.Rules, divertRule(lp, datapath.FamilyIPv6))
+				st.Routes = append(st.Routes, returnRoute(lp, datapath.FamilyIPv6))
+			}
 		}
 	}
+}
+
+// peerEndFor is the peer's end of the link in the family of addr, and false
+// when that is IPv6 and the link carries none.
+func (lp linkParams) peerEndFor(addr netip.Addr) (netip.Addr, bool) {
+	if addr.Is4() {
+		return lp.peerEnd, true
+	}
+	return lp.peerEnd6, lp.has6
+}
+
+// thisEndFor is this node's end of the link in the family of addr, and false
+// when that is IPv6 and the link carries none.
+func (lp linkParams) thisEndFor(addr netip.Addr) (netip.Addr, bool) {
+	if addr.Is4() {
+		return lp.thisEnd, true
+	}
+	return lp.thisEnd6, lp.has6
 }
 
 // remoteProgrammers returns, sorted, the mapping's programmers that are not the
@@ -404,7 +513,7 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 					stalled = true
 					break
 				}
-				if _, ok := buildLinkParams(idx, m.class, a.subnet, peer, m.endpoint.node, slot); !ok {
+				if _, ok := buildLinkParams(idx, m.class, a, peer, m.endpoint.node, slot); !ok {
 					m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
 						fmt.Sprintf("node %s on the return path has no usable address", peer), in.Now)
 					stalled = true
@@ -462,9 +571,11 @@ func portSel(pm *v1alpha1.PortMap) datapath.PortSel {
 	}
 }
 
-// linkDevice builds the vxlan device entry for one end of a return link.
-func linkDevice(lp linkParams) datapath.Link {
-	return datapath.Link{
+// linkDevice builds the vxlan device entry for one end of a return link. It
+// carries the /127 when the mapping is delivered over IPv6 and the link can
+// carry it.
+func linkDevice(lp linkParams, v6 bool) datapath.Link {
+	l := datapath.Link{
 		Name:       lp.name,
 		VNI:        lp.vni,
 		Port:       lp.port,
@@ -473,6 +584,10 @@ func linkDevice(lp linkParams) datapath.Link {
 		LinkAddr:   lp.linkAddr,
 		MTU:        lp.mtu,
 	}
+	if v6 && lp.has6 {
+		l.LinkAddr6 = lp.linkAddr6
+	}
+	return l
 }
 
 // loopGuardRule is the pref-101 rule that keeps the encapsulated reply, whose
@@ -484,14 +599,19 @@ func loopGuardRule(lp linkParams) datapath.IPRule {
 }
 
 // divertRule is the pref-102 rule that sends the marked reply to the return
-// table.
-func divertRule(lp linkParams) datapath.IPRule {
-	return datapath.IPRule{Pref: 102, Mark: lp.mark, To: nil, Table: lp.table}
+// table, in one family.
+func divertRule(lp linkParams, f datapath.Family) datapath.IPRule {
+	return datapath.IPRule{Pref: 102, Mark: lp.mark, To: nil, Table: lp.table, Family: f}
 }
 
-// returnRoute sends the return table's default out the link to the accepting node.
-func returnRoute(lp linkParams) datapath.Route {
-	return datapath.Route{Table: lp.table, Via: lp.peerEnd, Dev: lp.name}
+// returnRoute sends the return table's default out the link to the accepting
+// node, via the peer's end in one family.
+func returnRoute(lp linkParams, f datapath.Family) datapath.Route {
+	via := lp.peerEnd
+	if f == datapath.FamilyIPv6 {
+		via = lp.peerEnd6
+	}
+	return datapath.Route{Table: lp.table, Via: via, Dev: lp.name}
 }
 
 // index holds the lookups Compute needs, built once per pass so nothing rebuilds
@@ -571,7 +691,7 @@ func ruleKey(r datapath.IPRule) string {
 	if r.To != nil {
 		to = r.To.String()
 	}
-	return fmt.Sprintf("%010d|%010d|%s|%010d", r.Pref, r.Mark, to, r.Table)
+	return fmt.Sprintf("%010d|%010d|%s|%010d|%d", r.Pref, r.Mark, to, r.Table, r.Family)
 }
 
 func routeKey(r datapath.Route) string {

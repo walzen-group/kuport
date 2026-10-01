@@ -94,9 +94,19 @@ func classConditions(a classAlloc, now metav1.Time, generation int64) []metav1.C
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = v1alpha1.ReasonSubnetExhausted
 		cond.Message = "no free /31 slot remains in the return-path subnet"
+	case a.invalidSubnet6:
+		// The CRD's validation refuses this, so it is reached only by a class
+		// written past it. The links carry IPv4 alone meanwhile.
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = v1alpha1.ReasonInvalidSubnet
+		cond.Message = "return-path subnet6 is not an IPv6 CIDR holding a /127 for every /31 of subnet; the links carry IPv4 alone"
 	}
 	return []metav1.Condition{cond}
 }
+
+// ipv6ForwardingOff is the node row's ipv6Unavailable message on a host that
+// does not forward IPv6.
+const ipv6ForwardingOff = "net.ipv6.conf.all.forwarding is 0 on this node, so it delivers no mapping over IPv6"
 
 // buildPortMapStatus emits the status for every PortMap this node owns. Exactly
 // one node owns each PortMap, so exactly one agent writes it: the mapping's
@@ -119,6 +129,12 @@ func buildPortMapStatus(res *Result, in Inputs, mappings []*mapping) {
 
 		if m.endpoint != nil {
 			st.Endpoint = &v1alpha1.Endpoint{Node: m.endpoint.node, Address: m.endpoint.addr}
+			// The status writer reports the IPv6 address when it delivers
+			// IPv6 itself; the agent fills the published IPv6 addresses only
+			// then.
+			if pods := podAddrs(in, m); len(pods) > 1 {
+				st.Endpoint.Address6 = pods[1].String()
+			}
 			st.Published = publishedRows(m)
 		}
 
@@ -162,10 +178,24 @@ func statusOwner(in Inputs, m *mapping) string {
 // NIC. The message names the first interface that does not, in the shape
 // spec.md documents. Addresses carries the interfaces that do resolve, the
 // report the PortMap status writer reads for rows naming this node; an
-// unresolved interface is absent there and in the message.
+// unresolved interface is absent there and in the message. Addresses6 does the
+// same for IPv6 while this node forwards it. When it does not, and one of the
+// interfaces holds an IPv6 address an IPv6 client could dial, IPv6Unavailable
+// says why that client gets nothing. Neither touches readiness, since IPv4
+// works either way.
 func nodeRowFor(in Inputs, class *v1alpha1.PortMapClass) v1alpha1.NodeStatus {
 	row := v1alpha1.NodeStatus{Name: in.NodeName, Ready: true}
 	for _, iface := range classInterfacesOn(class, in.NodeName) {
+		if addr6, ok := in.InterfaceAddrs6[iface]; ok {
+			if !in.IPv6Forwarding {
+				row.IPv6Unavailable = ipv6ForwardingOff
+			} else {
+				if row.Addresses6 == nil {
+					row.Addresses6 = map[string]string{}
+				}
+				row.Addresses6[iface] = addr6
+			}
+		}
 		addr, ok := in.InterfaceAddrs[iface]
 		if !ok {
 			row.Ready = false

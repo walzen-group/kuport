@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/bits"
 	"net/netip"
 	"sort"
 	"time"
@@ -17,6 +18,16 @@ import (
 
 // defaultSubnet is the class return-path subnet when none is set: 128 /31 slots.
 const defaultSubnet = "169.254.77.0/24"
+
+// defaultSubnet6 is the IPv6 return-path subnet when none is set: 32768 /127
+// slots, of which a slot uses the one its /31 does. The 40 bits after fd are
+// random, per RFC 4193.
+const defaultSubnet6 = "fd64:f5ac:e961::/112"
+
+// ipv6MinMTU is the smallest MTU a device may have and still carry IPv6. The
+// kernel refuses an IPv6 address on a smaller device, and that refusal would
+// fail the whole apply, IPv4 included.
+const ipv6MinMTU = 1280
 
 // markBase is OR'd with a slot to form the packet mark that keeps a return
 // diversion narrow. The high bits spell "kp".
@@ -38,10 +49,15 @@ type neededPair struct {
 type classAlloc struct {
 	subnet        netip.Prefix
 	invalidSubnet bool
-	exhausted     bool
-	existing      map[string]v1alpha1.LinkAllocation
-	needed        map[string]neededPair
-	newly         map[string]int // key -> slot, to propose as a claim
+	// subnet6 is the IPv6 subnet the links' /127s come from. It is invalid,
+	// and the links carry IPv4 alone, when the class's subnet6 does not parse
+	// as IPv6 or holds fewer /127s than subnet holds /31s.
+	subnet6        netip.Prefix
+	invalidSubnet6 bool
+	exhausted      bool
+	existing       map[string]v1alpha1.LinkAllocation
+	needed         map[string]neededPair
+	newly          map[string]int // key -> slot, to propose as a claim
 }
 
 // neededPairsByClass groups the return-link pairs every accepted mapping needs,
@@ -92,6 +108,12 @@ func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) c
 	}
 	a.subnet = subnet
 	total := slotCount(subnet)
+
+	if s6, err := parseClassSubnet6(class, total); err == nil {
+		a.subnet6 = s6
+	} else {
+		a.invalidSubnet6 = true
+	}
 
 	used := map[int]bool{}
 	for _, la := range class.Status.Links {
@@ -145,6 +167,12 @@ type linkParams struct {
 	thisEnd    netip.Addr // this node's /31 address
 	peerEnd    netip.Addr // peer's /31 address
 	linkAddr   netip.Prefix
+	// The IPv6 ends, set when the class's subnet6 is usable and the link is
+	// large enough for IPv6; has6 says which.
+	has6       bool
+	thisEnd6   netip.Addr
+	peerEnd6   netip.Addr
+	linkAddr6  netip.Prefix
 	peerNode32 netip.Prefix // peer node address as a /32, for the loop guard
 	mark       uint32
 	table      uint32
@@ -155,21 +183,23 @@ type linkParams struct {
 
 // buildLinkParams derives the link for the pair (thisNode, peer) at a slot. It
 // returns false when either node's address or the subnet cannot be resolved.
-func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Prefix, thisNode, peer string, slot int) (linkParams, bool) {
+func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, a classAlloc, thisNode, peer string, slot int) (linkParams, bool) {
 	local, err1 := netip.ParseAddr(nodeAddrOf(idx, thisNode))
 	remote, err2 := netip.ParseAddr(nodeAddrOf(idx, peer))
 	if err1 != nil || err2 != nil {
 		return linkParams{}, false
 	}
 
-	lo, hi := nthSlash31(subnet, slot)
-	pair := sortedPair(thisNode, peer)
-	var thisEnd, peerEnd netip.Addr
-	if thisNode == pair[0] {
-		thisEnd, peerEnd = lo, hi
-	} else {
-		thisEnd, peerEnd = hi, lo
+	// The lower-named node takes the low address of each pair, in both
+	// families, so both ends compute each other's addresses from the slot.
+	first := thisNode == sortedPair(thisNode, peer)[0]
+	ends := func(lo, hi netip.Addr) (netip.Addr, netip.Addr) {
+		if first {
+			return lo, hi
+		}
+		return hi, lo
 	}
+	thisEnd, peerEnd := ends(nthSlash31(a.subnet, slot))
 
 	// The kernel keys a VXLAN device by VNI and UDP port, so two links on one
 	// node cannot share both. Under Multi serving the pod's node holds a link
@@ -177,7 +207,7 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 	// is the base and each pair sits at base+slot. Both ends derive it from the
 	// same recorded slot, so they agree without negotiating.
 	vni, port := vxlanParams(class)
-	return linkParams{
+	lp := linkParams{
 		slot:       slot,
 		name:       linkName(class.Name, peer),
 		localAddr:  local,
@@ -191,7 +221,16 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, subnet netip.Pref
 		vni:        vni + uint32(slot),
 		port:       port,
 		mtu:        linkMTUFor(class, thisNode, peer, local.Is4() && remote.Is4()),
-	}, true
+	}
+
+	// Both ends read the same subnet6 and the same two MTU rows, so they agree
+	// on whether the link carries IPv6 as they agree on everything else.
+	if a.subnet6.IsValid() && (lp.mtu == 0 || lp.mtu >= ipv6MinMTU) {
+		lp.has6 = true
+		lp.thisEnd6, lp.peerEnd6 = ends(nthSlash127(a.subnet6, slot))
+		lp.linkAddr6 = netip.PrefixFrom(lp.thisEnd6, 127)
+	}
+	return lp, true
 }
 
 // linkMTUFor sizes the device to the path it rides: the smaller of the two
@@ -250,6 +289,44 @@ func parseClassSubnet(class *v1alpha1.PortMapClass) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("subnet %q is not IPv4", s)
 	}
 	return p.Masked(), nil
+}
+
+// parseClassSubnet6 parses a class's IPv6 return-path subnet, masked to its
+// prefix, falling back to the default when unset. A slot indexes both subnets,
+// so subnet6 must hold at least slots /127s.
+func parseClassSubnet6(class *v1alpha1.PortMapClass, slots int) (netip.Prefix, error) {
+	s := defaultSubnet6
+	if v := class.Spec.ReturnPath.Vxlan; v != nil && v.Subnet6 != "" {
+		s = v.Subnet6
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	if !p.Addr().Is6() || p.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("subnet6 %q is not IPv6", s)
+	}
+	// A /(128-host) holds 2^(host-1) /127s, and a /128 holds none.
+	if host := 128 - p.Bits(); host < 1 || (host-1 < 31 && 1<<(host-1) < slots) {
+		return netip.Prefix{}, fmt.Errorf("subnet6 %q holds fewer than %d /127s", s, slots)
+	}
+	return p.Masked(), nil
+}
+
+// nthSlash127 returns the two addresses of the slot-th /127 within an IPv6
+// subnet, the IPv6 twin of nthSlash31.
+func nthSlash127(subnet netip.Prefix, slot int) (netip.Addr, netip.Addr) {
+	b := subnet.Addr().As16()
+	hi, lo := binary.BigEndian.Uint64(b[:8]), binary.BigEndian.Uint64(b[8:])
+	at := func(off uint64) netip.Addr {
+		l, carry := bits.Add64(lo, off, 0)
+		var a [16]byte
+		binary.BigEndian.PutUint64(a[:8], hi+carry)
+		binary.BigEndian.PutUint64(a[8:], l)
+		return netip.AddrFrom16(a)
+	}
+	off := uint64(slot) * 2
+	return at(off), at(off + 1)
 }
 
 // slotCount is how many /31s a subnet holds.
