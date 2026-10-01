@@ -5,9 +5,11 @@ table inet kuport {
 	chain kup-post {
 		type nat hook postrouting priority srcnat - 10; policy accept;
 		oifname != "cilium_*" ip saddr 10.244.18.107 udp sport 3000 counter snat ip to ip saddr
+		oifname != "cilium_*" ip6 saddr fd00:10:244:12::6b udp sport 3000 counter snat ip6 to ip6 saddr
 	}
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
 		ip saddr 10.244.18.107 udp sport 3000 counter meta mark set 0x6b700001
+		ip6 saddr fd00:10:244:12::6b udp sport 3000 counter meta mark set 0x6b700001
 	}
 }

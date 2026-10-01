@@ -48,7 +48,8 @@ const (
 // Rule is one nftables rule described by semantic fields rather than by
 // expressions or text. nftExprs (what is applied) and nftText (what the goldens
 // compare) both derive from this one struct, so a golden that passes while the
-// applied rule is wrong cannot happen.
+// applied rule is wrong cannot happen. Its family is read off the addresses it
+// carries, so an IPv6 rule is the same struct holding IPv6 addresses.
 type Rule struct {
 	Chain     string
 	Kind      RuleKind
@@ -62,6 +63,28 @@ type Rule struct {
 	ToAddr    netip.Addr  // KindDNAT target address
 	ToPort    uint16      // KindDNAT target port; 0 keeps the matched port
 	Mark      uint32      // KindMark value
+}
+
+// family is the address family a rule is written for. ok is false for a rule
+// that carries no address, the conntrack save rule, which matches the link
+// alone and so covers a request of either family.
+func (r Rule) family() (f Family, ok bool) {
+	switch {
+	case r.SrcAddr != nil:
+		return familyOf(*r.SrcAddr), true
+	case r.DstAddr != nil:
+		return familyOf(*r.DstAddr), true
+	case r.Kind == KindDNAT && r.ToAddr.IsValid():
+		return familyOf(r.ToAddr), true
+	}
+	return FamilyIPv4, false
+}
+
+func familyOf(a netip.Addr) Family {
+	if a.Unmap().Is4() {
+		return FamilyIPv4
+	}
+	return FamilyIPv6
 }
 
 // Plan is the rendered, ordered desired state Apply writes: the nftables rules
@@ -186,8 +209,10 @@ func Render(s State) Plan {
 }
 
 // sortRules orders rules by chain, then within a chain by
-// (interface, protocol, first port, destination address), so the output is
-// stable regardless of how the State's slices were built.
+// (interface, protocol, first port, family, destination address), so the
+// output is stable regardless of how the State's slices were built. Family
+// sits before the address because a DNAT rule on an accepting interface
+// matches no address, and its IPv4 and IPv6 rules would otherwise tie.
 func sortRules(rules []Rule) {
 	sort.SliceStable(rules, func(i, j int) bool {
 		a, b := rules[i], rules[j]
@@ -203,8 +228,20 @@ func sortRules(rules []Rule) {
 		if a.Port.First != b.Port.First {
 			return a.Port.First < b.Port.First
 		}
+		if af, bf := familyKey(a), familyKey(b); af != bf {
+			return af < bf
+		}
 		return dstKey(a) < dstKey(b)
 	})
+}
+
+// familyKey sorts a rule with no family first, then IPv4, then IPv6.
+func familyKey(r Rule) int {
+	f, ok := r.family()
+	if !ok {
+		return 0
+	}
+	return int(f) + 1
 }
 
 func ifaceKey(r Rule) string {

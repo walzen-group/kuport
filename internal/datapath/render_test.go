@@ -6,8 +6,12 @@ import (
 )
 
 // pod is the endpoint address used across the golden cases; it is the address
-// the spec's own worked example carried traffic to.
-var pod = netip.MustParseAddr("10.244.18.107")
+// the spec's own worked example carried traffic to. pod6 is the same pod's
+// address on a dual-stack cluster.
+var (
+	pod  = netip.MustParseAddr("10.244.18.107")
+	pod6 = netip.MustParseAddr("fd00:10:244:12::6b")
+)
 
 // dpCase is one rendering scenario: a State and the shape its Plan must have.
 // The nftables rules are checked against a golden file (text_test.go); the
@@ -126,8 +130,83 @@ func cases() []dpCase {
 		},
 	}
 
+	// The dual-stack cases carry every rule kind in both families: the pod has
+	// an IPv6 address as well, and each link an IPv6 /127 beside its /31.
+	dst4 := pod
+	dst6 := pod6
+	src6 := pod6
+	acceptingDual := State{
+		DNAT: []DNATRule{
+			{Iface: "enp1s0", Port: udp3000, ToAddr: pod},
+			{Iface: "enp1s0", Port: udp3000, ToAddr: pod6},
+			{Iface: "wt0", Port: udp3000, ToAddr: pod},
+			{Iface: "wt0", Port: udp3000, ToAddr: pod6},
+		},
+		Exempt: []ExemptRule{
+			{OifName: "cilium_host", DstAddr: &dst6, Port: udp3000},
+			{OifName: "cilium_host", DstAddr: &dst4, Port: udp3000},
+		},
+	}
+
+	targetRemoteDual := State{
+		Exempt: []ExemptRule{
+			{OifName: "cilium_*", Negate: true, SrcAddr: &src6, Port: udp3000, PortIsSrc: true},
+			{OifName: "cilium_*", Negate: true, SrcAddr: &src, Port: udp3000, PortIsSrc: true},
+		},
+		Mark: []MarkRule{
+			{SrcAddr: pod6, Port: udp3000, Mark: 0x6b700001},
+			{SrcAddr: pod, Port: udp3000, Mark: 0x6b700001},
+		},
+		Links: []Link{
+			{
+				Name:       "kup-da0d9a1d",
+				VNI:        4242,
+				Port:       4790,
+				LocalAddr:  netip.MustParseAddr("100.64.0.2"),
+				RemoteAddr: acceptAddr,
+				LinkAddr:   netip.MustParsePrefix("169.254.77.1/31"),
+				LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::1/127"),
+			},
+		},
+		Rules: []IPRule{
+			{Pref: 101, Mark: 0x6b700001, To: &acceptCIDR, Table: 254},
+			{Pref: 102, Mark: 0x6b700001, Table: 200},
+			{Pref: 102, Mark: 0x6b700001, Table: 200, Family: FamilyIPv6},
+		},
+		Routes: []Route{
+			{Table: 200, Via: netip.MustParseAddr("169.254.77.0"), Dev: "kup-da0d9a1d"},
+			{Table: 200, Via: netip.MustParseAddr("fd64:f5ac:e961::"), Dev: "kup-da0d9a1d"},
+		},
+	}
+
+	multiLinkDstA6 := netip.MustParseAddr("fd64:f5ac:e961::1")
+	multiLinkDstB6 := netip.MustParseAddr("fd64:f5ac:e961::3")
+	targetRemoteMultiDual := State{
+		DNAT: []DNATRule{
+			{Iface: "kup-e5b1c204", Port: udp3000, ToAddr: pod6, DstAddr: &multiLinkDstB6},
+			{Iface: "kup-da0d9a1d", Port: udp3000, ToAddr: pod, DstAddr: &multiLinkDstA},
+			{Iface: "kup-da0d9a1d", Port: udp3000, ToAddr: pod6, DstAddr: &multiLinkDstA6},
+			{Iface: "kup-e5b1c204", Port: udp3000, ToAddr: pod, DstAddr: &multiLinkDstB},
+		},
+		Exempt: []ExemptRule{
+			{OifName: "cilium_*", Negate: true, SrcAddr: &src, Port: udp3000, PortIsSrc: true},
+			{OifName: "cilium_*", Negate: true, SrcAddr: &src6, Port: udp3000, PortIsSrc: true},
+		},
+		CtSave: []CtSaveRule{
+			{Iface: "kup-da0d9a1d", Mark: 0x6b700001},
+			{Iface: "kup-e5b1c204", Mark: 0x6b700002},
+		},
+		CtLoad: []CtLoadRule{
+			{SrcAddr: pod6, Port: udp3000},
+			{SrcAddr: pod, Port: udp3000},
+		},
+	}
+
 	return []dpCase{
 		{name: "accepting-single-port", state: accepting(udp3000), wantDNAT: 2, wantExempt: 1},
+		{name: "accepting-dual-stack", state: acceptingDual, wantDNAT: 4, wantExempt: 2},
+		{name: "target-remote-dual-stack", state: targetRemoteDual, wantExempt: 2, wantMark: 2, wantLinks: 1, wantRules: 3, wantRoutes: 2},
+		{name: "target-remote-multi-dual-stack", state: targetRemoteMultiDual, wantDNAT: 4, wantExempt: 2, wantCtSave: 2, wantCtLoad: 2},
 		{name: "accepting-port-range", state: accepting(udpRange), wantDNAT: 2, wantExempt: 1},
 		{name: "target-remote", state: targetRemote, wantExempt: 1, wantMark: 1, wantLinks: 1, wantRules: 2, wantRoutes: 1},
 		{name: "target-remote-multi", state: targetRemoteMulti, wantDNAT: 2, wantExempt: 1, wantCtSave: 2, wantCtLoad: 1, wantLinks: 2, wantRules: 4, wantRoutes: 2},

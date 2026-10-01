@@ -1,4 +1,4 @@
-table ip kuport {
+table inet kuport {
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 10; policy accept;
 	}

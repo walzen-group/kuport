@@ -63,10 +63,10 @@ func TestTranslateLocalPod(t *testing.T) {
 	}
 
 	text := datapath.Render(res.State).String()
-	if !strings.Contains(text, `tcp dport 3000 counter dnat to 10.244.5.5:8096`) {
+	if !strings.Contains(text, `tcp dport 3000 counter dnat ip to 10.244.5.5:8096`) {
 		t.Errorf("rendered ruleset lacks the translating DNAT:\n%s", text)
 	}
-	if !strings.Contains(text, `ip daddr 10.244.5.5 tcp dport 8096 counter snat to ip saddr`) {
+	if !strings.Contains(text, `ip daddr 10.244.5.5 tcp dport 8096 counter snat ip to ip saddr`) {
 		t.Errorf("rendered ruleset lacks the exemption on the translated port:\n%s", text)
 	}
 }

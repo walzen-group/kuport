@@ -3,6 +3,8 @@ package datapath
 import (
 	"context"
 	"net"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/nftables"
@@ -19,14 +21,34 @@ type fakeNFT struct {
 	tableAdds int
 	tableDels int
 	flushes   int
+	// tableOps logs every table operation as "add <family> <name>" or
+	// "del <family> <name>", in order, so a test can read what one pass did
+	// to which family.
+	tableOps []string
 }
 
-func (f *fakeNFT) AddTable(t *nftables.Table) *nftables.Table { f.tableAdds++; return t }
+func tableOp(op string, t *nftables.Table) string {
+	fam := map[nftables.TableFamily]string{
+		nftables.TableFamilyIPv4: "ip",
+		nftables.TableFamilyIPv6: "ip6",
+		nftables.TableFamilyINet: "inet",
+	}[t.Family]
+	return op + " " + fam + " " + t.Name
+}
+
+func (f *fakeNFT) AddTable(t *nftables.Table) *nftables.Table {
+	f.tableAdds++
+	f.tableOps = append(f.tableOps, tableOp("add", t))
+	return t
+}
 func (f *fakeNFT) FlushTable(t *nftables.Table)               { f.staged = 0 }
 func (f *fakeNFT) AddChain(c *nftables.Chain) *nftables.Chain { return c }
 func (f *fakeNFT) AddRule(r *nftables.Rule) *nftables.Rule    { f.staged++; return r }
-func (f *fakeNFT) DelTable(t *nftables.Table)                 { f.tableDels++ }
-func (f *fakeNFT) Flush() error                               { f.committed = f.staged; f.flushes++; return nil }
+func (f *fakeNFT) DelTable(t *nftables.Table) {
+	f.tableDels++
+	f.tableOps = append(f.tableOps, tableOp("del", t))
+}
+func (f *fakeNFT) Flush() error { f.committed = f.staged; f.flushes++; return nil }
 
 // fakeNL is a stateful netlink connection: it applies operations to its own
 // world so a second Apply finds everything already present and mutates nothing.
@@ -236,8 +258,40 @@ func TestTeardownRemovesOwned(t *testing.T) {
 	if len(nl.routes) != 0 {
 		t.Errorf("routes remain after teardown: %d", len(nl.routes))
 	}
-	if nft.tableDels != 1 {
-		t.Errorf("nft table deletions = %d, want 1", nft.tableDels)
+	// Teardown runs in a transaction of its own and removes both the inet table
+	// and a leftover ip one. Each delete is preceded by an add, which makes it
+	// succeed whether the table is there or not.
+	var dels []string
+	for _, op := range nft.tableOps {
+		if strings.HasPrefix(op, "del") {
+			dels = append(dels, op)
+		}
+	}
+	want := []string{"del ip kuport", "del inet kuport"}
+	if len(dels) < len(want) || !reflect.DeepEqual(dels[len(dels)-len(want):], want) {
+		t.Errorf("teardown deleted %v, want %v last", dels, want)
+	}
+}
+
+// TestApplyRemovesLegacyTable is the migration from releases that wrote
+// `table ip kuport`. The first pass of an agent that writes the inet table
+// deletes the ip one in the same transaction; leaving it would keep the old
+// DNAT rules answering beside the new ones, at the same priority, until the
+// node rebooted.
+func TestApplyRemovesLegacyTable(t *testing.T) {
+	nft := &fakeNFT{}
+	h := Handles{NFT: nft, NL: newFakeNL()}
+	if err := Apply(context.Background(), Render(targetRemoteState(t)), h); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// The ip table is added and deleted, so the delete cannot fail on a node
+	// that never had one, then the inet table is written.
+	want := []string{"add ip kuport", "del ip kuport", "add inet kuport"}
+	if !reflect.DeepEqual(nft.tableOps, want) {
+		t.Errorf("table operations = %v, want %v", nft.tableOps, want)
+	}
+	if nft.flushes != 1 {
+		t.Errorf("flushes = %d, want the migration and the rewrite in one transaction", nft.flushes)
 	}
 }
 

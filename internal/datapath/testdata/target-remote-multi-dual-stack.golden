@@ -2,15 +2,19 @@ table inet kuport {
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 10; policy accept;
 		iifname "kup-da0d9a1d" ip daddr 169.254.77.1 udp dport 3000 counter dnat ip to 10.244.18.107:3000
+		iifname "kup-da0d9a1d" ip6 daddr fd64:f5ac:e961::1 udp dport 3000 counter dnat ip6 to [fd00:10:244:12::6b]:3000
 		iifname "kup-e5b1c204" ip daddr 169.254.77.3 udp dport 3000 counter dnat ip to 10.244.18.107:3000
+		iifname "kup-e5b1c204" ip6 daddr fd64:f5ac:e961::3 udp dport 3000 counter dnat ip6 to [fd00:10:244:12::6b]:3000
 	}
 	chain kup-post {
 		type nat hook postrouting priority srcnat - 10; policy accept;
 		oifname != "cilium_*" ip saddr 10.244.18.107 udp sport 3000 counter snat ip to ip saddr
+		oifname != "cilium_*" ip6 saddr fd00:10:244:12::6b udp sport 3000 counter snat ip6 to ip6 saddr
 	}
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
 		ip saddr 10.244.18.107 udp sport 3000 counter meta mark set ct mark
+		ip6 saddr fd00:10:244:12::6b udp sport 3000 counter meta mark set ct mark
 		iifname "kup-da0d9a1d" counter ct mark set 0x6b700001
 		iifname "kup-e5b1c204" counter ct mark set 0x6b700002
 	}

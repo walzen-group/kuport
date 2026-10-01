@@ -76,7 +76,8 @@ type CtLoadRule struct {
 	Port    PortSel // matched as source port
 }
 
-// Link is one point-to-point VXLAN to a peer node.
+// Link is one point-to-point VXLAN to a peer node. The underlay is IPv4; the
+// device carries IPv6 inside it when LinkAddr6 is set.
 type Link struct {
 	Name       string // kup-<first 8 hex of sha256(peer node name)>
 	VNI        uint32
@@ -84,14 +85,25 @@ type Link struct {
 	LocalAddr  netip.Addr
 	RemoteAddr netip.Addr
 	LinkAddr   netip.Prefix // this node's end, a /31
+	LinkAddr6  netip.Prefix // this node's end, a /127; the zero Prefix means no IPv6
 	MTU        uint32       // 0 leaves the device at the kernel default
 }
 
+// Family is the address family of a routing rule. The zero value is IPv4, so a
+// rule written before IPv6 existed keeps its meaning.
+type Family uint8
+
+const (
+	FamilyIPv4 Family = iota
+	FamilyIPv6
+)
+
 type IPRule struct {
-	Pref  uint32
-	Mark  uint32
-	To    *netip.Prefix // set only on the loop-guard rule
-	Table uint32
+	Pref   uint32
+	Mark   uint32
+	To     *netip.Prefix // set only on the loop-guard rule
+	Table  uint32
+	Family Family
 }
 
 type Route struct {

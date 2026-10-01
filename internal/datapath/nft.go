@@ -10,9 +10,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// nftTable is the kuport table object, family ip.
+// nftTable is the kuport table object, family inet, so one table holds the
+// rules of both address families.
 func nftTable() *nftables.Table {
+	return &nftables.Table{Name: TableName, Family: nftables.TableFamilyINet}
+}
+
+// legacyTable is the family ip table releases before IPv6 wrote. Apply and
+// Teardown delete it, so a node upgraded in place does not keep its old DNAT
+// rules answering beside the new ones.
+func legacyTable() *nftables.Table {
 	return &nftables.Table{Name: TableName, Family: nftables.TableFamilyIPv4}
+}
+
+// delTable stages a delete that succeeds whether or not the table exists. A
+// bare delete of an absent table fails the whole transaction with ENOENT;
+// adding it first, which leaves an existing table as it is, gives the delete
+// something to remove either way.
+func delTable(conn NFTConn, t *nftables.Table) {
+	conn.AddTable(t)
+	conn.DelTable(t)
 }
 
 // nftChains returns the three base chains in fixed order, hooked and prioritised
@@ -53,6 +70,19 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 func nftExprs(r Rule) []expr.Any {
 	var e []expr.Any
 
+	// An inet table hands every rule packets of both families, and a payload
+	// load reads fixed offsets whatever the packet is. A rule with a family
+	// matches it first, so an address load never reads an IPv6 header at IPv4
+	// offsets. nft adds the same match when it parses `ip saddr` in an inet
+	// table.
+	fam, hasFam := r.family()
+	if hasFam {
+		e = append(e,
+			&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{nfproto(fam)}},
+		)
+	}
+
 	if r.IifName != "" {
 		e = append(e,
 			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
@@ -66,10 +96,10 @@ func nftExprs(r Rule) []expr.Any {
 		)
 	}
 	if r.SrcAddr != nil {
-		e = append(e, ipCmp(*r.SrcAddr, ipSrcOffset)...)
+		e = append(e, ipCmp(*r.SrcAddr, true)...)
 	}
 	if r.DstAddr != nil {
-		e = append(e, ipCmp(*r.DstAddr, ipDstOffset)...)
+		e = append(e, ipCmp(*r.DstAddr, false)...)
 	}
 
 	// Match the L4 protocol, then the port (source or destination). A rule with
@@ -90,7 +120,7 @@ func nftExprs(r Rule) []expr.Any {
 	case KindDNAT:
 		e = append(e, dnatExprs(r.ToAddr, r.Port, r.ToPort)...)
 	case KindSNAT:
-		e = append(e, snatIdentityExprs()...)
+		e = append(e, snatIdentityExprs(fam)...)
 	case KindMark:
 		e = append(e, markExprs(r.Mark)...)
 	case KindCtSave:
@@ -101,11 +131,38 @@ func nftExprs(r Rule) []expr.Any {
 	return e
 }
 
-// Byte offsets into the IPv4 header for the source and destination address.
+// Byte offsets into the IPv4 and IPv6 headers for the source and destination
+// address.
 const (
-	ipSrcOffset uint32 = 12
-	ipDstOffset uint32 = 16
+	ipSrcOffset  uint32 = 12
+	ipDstOffset  uint32 = 16
+	ip6SrcOffset uint32 = 8
+	ip6DstOffset uint32 = 24
 )
+
+// addrLoad is where a family keeps the source or destination address in its
+// network header, and how long the address is.
+func addrLoad(f Family, src bool) (offset, length uint32) {
+	switch {
+	case f == FamilyIPv6 && src:
+		return ip6SrcOffset, 16
+	case f == FamilyIPv6:
+		return ip6DstOffset, 16
+	case src:
+		return ipSrcOffset, 4
+	default:
+		return ipDstOffset, 4
+	}
+}
+
+// nfproto is the netfilter protocol number a family's packets carry, which is
+// what both the meta nfproto match and the NAT statement's family name.
+func nfproto(f Family) byte {
+	if f == FamilyIPv6 {
+		return unix.NFPROTO_IPV6
+	}
+	return unix.NFPROTO_IPV4
+}
 
 func protoNum(proto string) byte {
 	if proto == "tcp" {
@@ -130,20 +187,31 @@ func ifnameCmp(name string, neg bool) *expr.Cmp {
 	return &expr.Cmp{Op: op, Register: 1, Data: data}
 }
 
-// ipCmp loads a 4-byte IPv4 address from the network header at offset and
-// compares it for equality.
-func ipCmp(a netip.Addr, offset uint32) []expr.Any {
-	v4 := a.As4()
+// ipCmp loads the source or destination address from the network header, at
+// the offsets of the address's own family, and compares it for equality.
+func ipCmp(a netip.Addr, src bool) []expr.Any {
+	offset, length := addrLoad(familyOf(a), src)
 	return []expr.Any{
 		&expr.Payload{
 			OperationType: expr.PayloadLoad,
 			DestRegister:  1,
 			Base:          expr.PayloadBaseNetworkHeader,
 			Offset:        offset,
-			Len:           4,
+			Len:           length,
 		},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: v4[:]},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: addrBytes(a)},
 	}
+}
+
+// addrBytes is an address in network order: 4 bytes for IPv4, 16 for IPv6.
+// A register holds 16 bytes, so either fits register 1.
+func addrBytes(a netip.Addr) []byte {
+	if familyOf(a) == FamilyIPv4 {
+		v4 := a.Unmap().As4()
+		return v4[:]
+	}
+	v6 := a.As16()
+	return v6[:]
 }
 
 // portMatch loads the transport source or destination port and compares it,
@@ -172,19 +240,20 @@ func portMatch(p PortSel, isSrc bool) []expr.Any {
 }
 
 // dnatExprs rewrites the destination to a pod address and port range. A
-// non-zero toPort replaces the single matched port with that port.
+// non-zero toPort replaces the single matched port with that port. The NAT
+// carries the target's family, which an inet table needs to know how wide the
+// address in register 1 is.
 func dnatExprs(to netip.Addr, p PortSel, toPort uint16) []expr.Any {
-	v4 := to.As4()
 	if toPort != 0 {
 		p = PortSel{Proto: p.Proto, First: toPort, Last: toPort}
 	}
 	out := []expr.Any{
-		&expr.Immediate{Register: 1, Data: v4[:]},
+		&expr.Immediate{Register: 1, Data: addrBytes(to)},
 		&expr.Immediate{Register: 2, Data: binaryutil.BigEndian.PutUint16(p.First)},
 	}
 	nat := &expr.NAT{
 		Type:        expr.NATTypeDestNAT,
-		Family:      unix.NFPROTO_IPV4,
+		Family:      uint32(nfproto(familyOf(to))),
 		RegAddrMin:  1,
 		RegAddrMax:  1,
 		RegProtoMin: 2,
@@ -197,21 +266,22 @@ func dnatExprs(to netip.Addr, p PortSel, toPort uint16) []expr.Any {
 	return append(out, nat)
 }
 
-// snatIdentityExprs is the identity source NAT (snat to ip saddr): load the
-// packet's own source address and SNAT to it, claiming the connection before
-// the CNI's masquerade can rewrite it.
-func snatIdentityExprs() []expr.Any {
+// snatIdentityExprs is the identity source NAT (snat ip to ip saddr, or the
+// ip6 form): load the packet's own source address and SNAT to it, claiming the
+// connection before the CNI's masquerade can rewrite it.
+func snatIdentityExprs(f Family) []expr.Any {
+	offset, length := addrLoad(f, true)
 	return []expr.Any{
 		&expr.Payload{
 			OperationType: expr.PayloadLoad,
 			DestRegister:  1,
 			Base:          expr.PayloadBaseNetworkHeader,
-			Offset:        ipSrcOffset,
-			Len:           4,
+			Offset:        offset,
+			Len:           length,
 		},
 		&expr.NAT{
 			Type:       expr.NATTypeSourceNAT,
-			Family:     unix.NFPROTO_IPV4,
+			Family:     uint32(nfproto(f)),
 			RegAddrMin: 1,
 			RegAddrMax: 1,
 		},
@@ -246,10 +316,13 @@ func ctLoadExprs() []expr.Any {
 	}
 }
 
-// applyNFT writes the whole kuport table in one transaction: add the table,
-// flush it, add the chains and rules, then flush the connection. Rewriting the
-// entire table each pass is what makes a deleted mapping disappear by absence.
+// applyNFT writes the whole kuport table in one transaction: remove a leftover
+// ip table, add the inet table, flush it, add the chains and rules, then flush
+// the connection. Rewriting the entire table each pass is what makes a deleted
+// mapping disappear by absence.
 func applyNFT(conn NFTConn, plan Plan) error {
+	delTable(conn, legacyTable())
+
 	t := nftTable()
 	conn.AddTable(t)
 	conn.FlushTable(t)
@@ -269,8 +342,10 @@ func applyNFT(conn NFTConn, plan Plan) error {
 	return conn.Flush()
 }
 
-// teardownNFT removes the whole kuport table.
+// teardownNFT removes the whole kuport table, and the ip table an older
+// release left behind.
 func teardownNFT(conn NFTConn) error {
-	conn.DelTable(nftTable())
+	delTable(conn, legacyTable())
+	delTable(conn, nftTable())
 	return conn.Flush()
 }
