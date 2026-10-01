@@ -54,7 +54,8 @@ func (r *Reconciler) writePortMap(ctx context.Context, key types.NamespacedName,
 
 		next := pm.DeepCopy()
 		next.Status.Endpoint = desired.Endpoint
-		next.Status.Published = r.fillPublished(ctx, pm.Spec.ClassName, desired.Published)
+		want6 := desired.Endpoint != nil && desired.Endpoint.Address6 != ""
+		next.Status.Published = r.fillPublished(ctx, pm.Spec.ClassName, desired.Published, want6)
 		next.Status.ObservedGeneration = desired.ObservedGeneration
 		for _, c := range desired.Conditions {
 			meta.SetStatusCondition(&next.Status.Conditions, c)
@@ -73,8 +74,9 @@ func (r *Reconciler) writePortMap(ctx context.Context, key types.NamespacedName,
 // agent publishes the addresses of the class's interfaces on its node into its
 // class status row, and the writer reads them from there. A row whose node has
 // not reported yet keeps the empty address Compute produced and fills in on a
-// later pass.
-func (r *Reconciler) fillPublished(ctx context.Context, className string, rows []v1alpha1.PublishedAddress) []v1alpha1.PublishedAddress {
+// later pass. With want6, set when the mapping is delivered over IPv6, each
+// row's IPv6 address is resolved the same way.
+func (r *Reconciler) fillPublished(ctx context.Context, className string, rows []v1alpha1.PublishedAddress, want6 bool) []v1alpha1.PublishedAddress {
 	if len(rows) == 0 {
 		return rows
 	}
@@ -83,7 +85,7 @@ func (r *Reconciler) fillPublished(ctx context.Context, className string, rows [
 
 	needClass := false
 	for _, row := range out {
-		if row.Address == "" && row.Node != r.NodeName {
+		if row.Node != r.NodeName && (row.Address == "" || (want6 && row.Address6 == "")) {
 			needClass = true
 			break
 		}
@@ -98,12 +100,16 @@ func (r *Reconciler) fillPublished(ctx context.Context, className string, rows [
 	}
 
 	for i := range out {
-		if out[i].Address != "" {
-			continue
-		}
 		if out[i].Node == r.NodeName {
-			if addr, err := r.Host.InterfaceAddr(out[i].Interface); err == nil {
-				out[i].Address = addr
+			if out[i].Address == "" {
+				if addr, err := r.Host.InterfaceAddr(out[i].Interface); err == nil {
+					out[i].Address = addr
+				}
+			}
+			if want6 && out[i].Address6 == "" {
+				if addr, err := r.Host.InterfaceAddr6(out[i].Interface); err == nil {
+					out[i].Address6 = addr
+				}
 			}
 			continue
 		}
@@ -111,8 +117,11 @@ func (r *Reconciler) fillPublished(ctx context.Context, className string, rows [
 			if nr.Name != out[i].Node {
 				continue
 			}
-			if addr, ok := nr.Addresses[out[i].Interface]; ok {
+			if addr, ok := nr.Addresses[out[i].Interface]; ok && out[i].Address == "" {
 				out[i].Address = addr
+			}
+			if addr, ok := nr.Addresses6[out[i].Interface]; ok && want6 && out[i].Address6 == "" {
+				out[i].Address6 = addr
 			}
 			break
 		}

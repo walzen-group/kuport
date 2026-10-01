@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -131,6 +132,64 @@ func TestWritePortMapStatus(t *testing.T) {
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAccepted) == nil {
 		t.Error("Accepted condition not written")
+	}
+}
+
+// TestWritePortMapStatusFillsIPv6: when the mapping is delivered over IPv6,
+// which Compute signals with the endpoint's IPv6 address, each published row
+// also carries its interface's IPv6 address, read off the host for this node
+// and from the reported class row for another. When it is not, no row carries
+// one, even where the interface has an IPv6 address: that address would not
+// answer.
+func TestWritePortMapStatusFillsIPv6(t *testing.T) {
+	cls := &v1alpha1.PortMapClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "public"},
+		Status: v1alpha1.PortMapClassStatus{Nodes: []v1alpha1.NodeStatus{{
+			Name: "b", Ready: true,
+			Addresses:  map[string]string{"wt0": "100.64.0.9"},
+			Addresses6: map[string]string{"wt0": "fd7a:115c:a1e0::9"},
+		}}},
+	}
+	write := func(endpoint6 string) []v1alpha1.PublishedAddress {
+		t.Helper()
+		pm := &v1alpha1.PortMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "web"},
+			Spec:       v1alpha1.PortMapSpec{ClassName: "public"},
+		}
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+			WithObjects(pm, cls.DeepCopy()).WithStatusSubresource(pm, cls).Build()
+		r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{
+			ifaceAddr:  map[string]string{"wt0": "100.64.0.7"},
+			ifaceAddr6: map[string]string{"wt0": "fd7a:115c:a1e0::7"},
+		}}
+		key := types.NamespacedName{Namespace: "team", Name: "web"}
+		desired := v1alpha1.PortMapStatus{
+			Endpoint:  &v1alpha1.Endpoint{Node: "a", Address: "10.1.0.5", Address6: endpoint6},
+			Published: []v1alpha1.PublishedAddress{{Node: "a", Interface: "wt0"}, {Node: "b", Interface: "wt0"}},
+		}
+		if err := r.writePortMap(context.Background(), key, desired); err != nil {
+			t.Fatalf("writePortMap: %v", err)
+		}
+		var got v1alpha1.PortMap
+		if err := c.Get(context.Background(), key, &got); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return got.Status.Published
+	}
+
+	rows := write("fd00:10:1::5")
+	want := []v1alpha1.PublishedAddress{
+		{Node: "a", Interface: "wt0", Address: "100.64.0.7", Address6: "fd7a:115c:a1e0::7"},
+		{Node: "b", Interface: "wt0", Address: "100.64.0.9", Address6: "fd7a:115c:a1e0::9"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("published = %+v, want %+v", rows, want)
+	}
+
+	for _, r := range write("") {
+		if r.Address6 != "" {
+			t.Errorf("published row %+v carries an ipv6 address for a mapping not delivered over ipv6", r)
+		}
 	}
 }
 

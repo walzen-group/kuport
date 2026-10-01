@@ -2,8 +2,13 @@ package agent
 
 import (
 	"context"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +34,7 @@ func TestBuildInputs(t *testing.T) {
 		},
 	).Build()
 
-	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow}
+	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{}}
 
 	in, err := r.buildInputs(context.Background())
 	if err != nil {
@@ -93,5 +98,78 @@ func TestBuildInputsResolvesInterfaces(t *testing.T) {
 	}
 	if _, ok := in.InterfaceAddrs["missing0"]; ok {
 		t.Errorf("unresolvable interface made it into the map: %v", in.InterfaceAddrs)
+	}
+}
+
+// TestBuildInputsReadsIPv6 hands Compute the two host facts IPv6 delivery
+// depends on: each class interface's IPv6 address, and whether the host
+// forwards IPv6 at all.
+func TestBuildInputsReadsIPv6(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(&v1alpha1.PortMapClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "pub"},
+		Spec: v1alpha1.PortMapClassSpec{
+			Nodes: map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: []string{"eth0", "wt0"}}},
+		},
+	}).Build()
+
+	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Log: logr.Discard(), Host: &fakeHost{
+		ifaceAddr:  map[string]string{"eth0": "192.0.2.10", "wt0": "100.64.0.7"},
+		ifaceAddr6: map[string]string{"wt0": "fd7a:115c:a1e0::7"},
+		ipv6Fwd:    true,
+	}}
+	in, err := r.buildInputs(context.Background())
+	if err != nil {
+		t.Fatalf("buildInputs: %v", err)
+	}
+	if !in.IPv6Forwarding {
+		t.Error("IPv6Forwarding = false, want the host's true")
+	}
+	if want := map[string]string{"wt0": "fd7a:115c:a1e0::7"}; !reflect.DeepEqual(in.InterfaceAddrs6, want) {
+		t.Errorf("InterfaceAddrs6 = %v, want %v", in.InterfaceAddrs6, want)
+	}
+}
+
+// TestIPv6ForwardingIsLogged: a node with IPv6 forwarding off delivers IPv4 and
+// not IPv6, which no PortMap condition shows when the node is not a mapping's
+// serving node. The agent says so in its log once when it finds forwarding
+// off, again when it comes back, and not on every pass in between. An
+// unreadable sysctl counts as off.
+func TestIPv6ForwardingIsLogged(t *testing.T) {
+	var lines []string
+	log := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
+	host := &fakeHost{ipv6Fwd: false}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Log: log, Host: host}
+
+	pass := func() {
+		t.Helper()
+		if _, err := r.buildInputs(context.Background()); err != nil {
+			t.Fatalf("buildInputs: %v", err)
+		}
+	}
+	count := func(sub string) int {
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, sub) {
+				n++
+			}
+		}
+		return n
+	}
+
+	pass()
+	pass()
+	if n := count("IPv6 forwarding is off"); n != 1 {
+		t.Errorf("%d lines saying forwarding is off after two passes, want 1: %v", n, lines)
+	}
+	host.ipv6Fwd = true
+	pass()
+	if n := count("IPv6 forwarding is on"); n != 1 {
+		t.Errorf("%d lines saying forwarding is on, want 1: %v", n, lines)
+	}
+	host.ipv6Fwd, host.ipv6FwdErr = true, os.ErrNotExist
+	pass()
+	if n := count("IPv6 forwarding is off"); n != 2 {
+		t.Errorf("an unreadable sysctl logged %d off lines in all, want 2: %v", n, lines)
 	}
 }

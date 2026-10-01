@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -66,7 +67,19 @@ type fakeHost struct {
 	underlay    int
 	underlayErr error
 	ifaceAddr   map[string]string
+	ifaceAddr6  map[string]string
+	ipv6Fwd     bool
+	ipv6FwdErr  error
 }
+
+func (h *fakeHost) InterfaceAddr6(name string) (string, error) {
+	if a, ok := h.ifaceAddr6[name]; ok {
+		return a, nil
+	}
+	return "", net.UnknownNetworkError(name)
+}
+
+func (h *fakeHost) IPv6Forwarding() (bool, error) { return h.ipv6Fwd, h.ipv6FwdErr }
 
 func (h *fakeHost) TunnelMode(context.Context) (bool, bool, error) {
 	return h.tunnelOK, h.tunnelKnown, h.tunnelErr
@@ -89,9 +102,9 @@ func (h *fakeHost) InterfaceAddr(name string) (string, error) {
 }
 
 // fakeNetlink is a minimal datapath.NetlinkConn for the host checks: it serves a
-// fixed set of links, each with an MTU and a set of IPv4 addresses. Only the
-// read methods the host checks call are meaningful; the mutating methods return
-// nil so the interface is satisfied.
+// fixed set of links, each with an MTU and a set of addresses, listed per family
+// the way the kernel lists them. Only the read methods the host checks call are
+// meaningful; the mutating methods return nil so the interface is satisfied.
 type fakeNetlink struct {
 	links map[string]fakeLink
 }
@@ -118,14 +131,23 @@ func (f fakeNetlink) LinkList() ([]netlink.Link, error) {
 	return out, nil
 }
 
-func (f fakeNetlink) AddrList(link netlink.Link, _ int) ([]netlink.Addr, error) {
+func (f fakeNetlink) AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
 	l, ok := f.links[link.Attrs().Name]
 	if !ok {
 		return nil, nil
 	}
 	var out []netlink.Addr
 	for _, a := range l.addrs {
-		out = append(out, netlink.Addr{IPNet: &net.IPNet{IP: net.ParseIP(a), Mask: net.CIDRMask(24, 32)}})
+		ip := net.ParseIP(a)
+		v4 := ip.To4() != nil
+		if (family == unix.AF_INET && !v4) || (family == unix.AF_INET6 && v4) {
+			continue
+		}
+		mask := net.CIDRMask(24, 32)
+		if !v4 {
+			mask = net.CIDRMask(64, 128)
+		}
+		out = append(out, netlink.Addr{IPNet: &net.IPNet{IP: ip, Mask: mask}})
 	}
 	return out, nil
 }

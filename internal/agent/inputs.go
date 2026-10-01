@@ -48,18 +48,47 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	for i := range slices.Items {
 		in.Slices = append(in.Slices, &slices.Items[i])
 	}
-	in.InterfaceAddrs = r.resolveInterfaces(in.Classes)
+	in.InterfaceAddrs, in.InterfaceAddrs6 = r.resolveInterfaces(in.Classes)
+	in.IPv6Forwarding = r.ipv6Forwarding()
 	return in, nil
+}
+
+// ipv6Forwarding reads whether the host forwards IPv6. An unreadable sysctl
+// counts as off: the node then programs IPv4 alone, which is what it can
+// deliver. A change is logged once, because a node that is no mapping's
+// serving node has no status that would show it.
+func (r *Reconciler) ipv6Forwarding() bool {
+	on, err := r.Host.IPv6Forwarding()
+	if err != nil {
+		on = false
+	}
+	if r.lastIPv6Fwd == nil || *r.lastIPv6Fwd != on {
+		if on {
+			r.Log.Info("IPv6 forwarding is on; mappings with an IPv6 endpoint are delivered over IPv6 here")
+		} else {
+			r.Log.Info("IPv6 forwarding is off; this node delivers IPv4 alone",
+				"sysctl", "net.ipv6.conf.all.forwarding", "readError", errString(err))
+		}
+		r.lastIPv6Fwd = &on
+	}
+	return on
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // resolveInterfaces reads the interfaces the classes give this node off the
 // host, each one once, for the snapshot Compute turns into class node rows.
 // Interfaces a class gives other nodes are never read here, so a class naming
 // eth0 on one node and enp1s0 on another leaves each node reading only its
-// own. An interface the host cannot resolve is absent from the map; Compute
-// reports it as a not-ready row naming it, never as a skipped row.
-func (r *Reconciler) resolveInterfaces(classes []*v1alpha1.PortMapClass) map[string]string {
-	var out map[string]string
+// own. An interface the host cannot resolve is absent from the first map;
+// Compute reports it as a not-ready row naming it, never as a skipped row. The
+// second map holds the IPv6 addresses of those that have one.
+func (r *Reconciler) resolveInterfaces(classes []*v1alpha1.PortMapClass) (v4, v6 map[string]string) {
 	seen := map[string]bool{}
 	for _, c := range classes {
 		for _, iface := range c.Spec.Nodes[r.NodeName].Interfaces {
@@ -68,12 +97,18 @@ func (r *Reconciler) resolveInterfaces(classes []*v1alpha1.PortMapClass) map[str
 			}
 			seen[iface] = true
 			if addr, err := r.Host.InterfaceAddr(iface); err == nil {
-				if out == nil {
-					out = map[string]string{}
+				if v4 == nil {
+					v4 = map[string]string{}
 				}
-				out[iface] = addr
+				v4[iface] = addr
+			}
+			if addr, err := r.Host.InterfaceAddr6(iface); err == nil {
+				if v6 == nil {
+					v6 = map[string]string{}
+				}
+				v6[iface] = addr
 			}
 		}
 	}
-	return out
+	return v4, v6
 }

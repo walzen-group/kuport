@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -111,5 +113,64 @@ func TestInterfaceAddr(t *testing.T) {
 	}
 	if _, err := h.InterfaceAddr("missing"); err == nil {
 		t.Error("InterfaceAddr on a missing interface: want error, got nil")
+	}
+}
+
+// TestInterfaceAddr6 resolves the IPv6 address a client dials on an interface.
+// Every interface with IPv6 on carries a link-local address, often listed
+// first, and no client outside the link can reach it, so it never counts.
+func TestInterfaceAddr6(t *testing.T) {
+	nl := fakeNetlink{links: map[string]fakeLink{
+		"wt0":  {index: 2, mtu: 1280, addrs: []string{"100.64.93.143", "fe80::1", "fd7a:115c:a1e0::9"}},
+		"eth1": {index: 3, mtu: 1500, addrs: []string{"192.0.2.10", "fe80::2"}},
+	}}
+	h := NewHost(fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), nl)
+
+	addr, err := h.InterfaceAddr6("wt0")
+	if err != nil {
+		t.Fatalf("InterfaceAddr6: %v", err)
+	}
+	if addr != "fd7a:115c:a1e0::9" {
+		t.Errorf("InterfaceAddr6 = %q, want fd7a:115c:a1e0::9", addr)
+	}
+	if v4, _ := h.InterfaceAddr("wt0"); v4 != "100.64.93.143" {
+		t.Errorf("InterfaceAddr = %q beside an ipv6 address, want 100.64.93.143", v4)
+	}
+	if a, err := h.InterfaceAddr6("eth1"); err == nil {
+		t.Errorf("InterfaceAddr6 on a link-local-only interface = %q, want an error", a)
+	}
+}
+
+// TestIPv6Forwarding reads the sysctl the way the kernel writes it, with a
+// trailing newline.
+func TestIPv6Forwarding(t *testing.T) {
+	for _, tc := range []struct {
+		content string
+		want    bool
+	}{
+		{"1\n", true},
+		{"0\n", false},
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "sys/net/ipv6/conf/all")
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "forwarding"), []byte(tc.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := &realHost{proc: dir}
+		got, err := h.IPv6Forwarding()
+		if err != nil {
+			t.Fatalf("IPv6Forwarding: %v", err)
+		}
+		if got != tc.want {
+			t.Errorf("IPv6Forwarding with %q = %v, want %v", tc.content, got, tc.want)
+		}
+	}
+
+	// A kernel without IPv6 has no such file.
+	if _, err := (&realHost{proc: t.TempDir()}).IPv6Forwarding(); err == nil {
+		t.Error("IPv6Forwarding with no sysctl: want an error")
 	}
 }

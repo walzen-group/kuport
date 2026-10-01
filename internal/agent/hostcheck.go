@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +27,7 @@ const ciliumTunnelPort = 8472
 type realHost struct {
 	reader client.Reader // uncached; reads cilium-config directly
 	nl     datapath.NetlinkConn
+	proc   string // where procfs is mounted; "" means /proc
 }
 
 // NewHost builds the production Host from an uncached API reader and a netlink
@@ -98,4 +102,39 @@ func (h *realHost) InterfaceAddr(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("interface %s has no IPv4 address", name)
+}
+
+// InterfaceAddr6 returns the first global IPv6 address on a named interface,
+// the address an IPv6 client dials. The link-local address every IPv6
+// interface carries is skipped: nothing beyond the link can reach it.
+func (h *realHost) InterfaceAddr6(name string) (string, error) {
+	link, err := h.nl.LinkByName(name)
+	if err != nil {
+		return "", err
+	}
+	addrs, err := h.nl.AddrList(link, unix.AF_INET6)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range addrs {
+		if a.IP != nil && a.IP.To4() == nil && !a.IP.IsLinkLocalUnicast() {
+			return a.IP.String(), nil
+		}
+	}
+	return "", fmt.Errorf("interface %s has no global IPv6 address", name)
+}
+
+// IPv6Forwarding reads net.ipv6.conf.all.forwarding from procfs. Cilium with
+// IPv6 on sets it to 1. A kernel without IPv6 has no such file, which the
+// caller treats as off.
+func (h *realHost) IPv6Forwarding() (bool, error) {
+	proc := h.proc
+	if proc == "" {
+		proc = "/proc"
+	}
+	b, err := os.ReadFile(filepath.Join(proc, "sys/net/ipv6/conf/all/forwarding"))
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(b)) == "1", nil
 }

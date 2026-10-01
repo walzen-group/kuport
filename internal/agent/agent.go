@@ -3,7 +3,7 @@
 // datapath state that comes back, and writes the status this node is
 // responsible for. It also performs the host checks Compute cannot make,
 // because they need root: the CNI's tunnel mode, a return-link port collision,
-// and the underlay MTU.
+// the underlay MTU, and whether the host forwards IPv6.
 //
 // The reconcile is level-driven and whole-node. Every watch event maps to one
 // fixed request key, so any change recomputes the complete desired state for
@@ -63,6 +63,13 @@ type Host interface {
 	UnderlayMTU(internalIP string) (int, error)
 	// InterfaceAddr is the first IPv4 address on a named local interface.
 	InterfaceAddr(name string) (string, error)
+	// InterfaceAddr6 is the first global IPv6 address on a named local
+	// interface, the one an IPv6 client dials. Link-local addresses do not
+	// count.
+	InterfaceAddr6(name string) (string, error)
+	// IPv6Forwarding reports net.ipv6.conf.all.forwarding. A node that does
+	// not forward IPv6 cannot hand an IPv6 request to a pod.
+	IPv6Forwarding() (bool, error)
 }
 
 // Reconciler is the whole-node reconcile loop. Everything host-facing is behind
@@ -86,6 +93,10 @@ type Reconciler struct {
 	// lastState fingerprints the last applied datapath state, so an applied
 	// change logs at info and a no-op pass at debug.
 	lastState string
+
+	// lastIPv6Fwd is the IPv6 forwarding state last logged, nil before the
+	// first read, so the log says it once per change rather than every pass.
+	lastIPv6Fwd *bool
 }
 
 // Ready reports whether at least one reconcile has completed. The caches are
