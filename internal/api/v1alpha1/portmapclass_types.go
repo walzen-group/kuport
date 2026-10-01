@@ -99,6 +99,12 @@ type ReturnPath struct {
 }
 
 // VxlanConfig sets the parameters of the VXLAN return links this class builds.
+// A slot indexes a /31 of subnet and a /127 of subnet6 alike, so subnet6 must
+// hold at least as many /127s as subnet holds /31s: 127 minus its prefix
+// length at least 31 minus subnet's.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.subnet6) || (isCIDR(self.subnet6) && cidr(self.subnet6).ip().family() == 6)",message="subnet6 must be an IPv6 prefix"
+// +kubebuilder:validation:XValidation:rule="!has(self.subnet6) || !has(self.subnet) || !isCIDR(self.subnet6) || !isCIDR(self.subnet) || cidr(self.subnet6).prefixLength() - cidr(self.subnet).prefixLength() <= 96",message="subnet6 must hold at least as many /127s as subnet holds /31s"
 type VxlanConfig struct {
 	// +kubebuilder:default=4242
 	// +optional
@@ -113,6 +119,12 @@ type VxlanConfig struct {
 	// +kubebuilder:default="169.254.77.0/24"
 	// +optional
 	Subnet string `json:"subnet,omitempty"`
+
+	// IPv6 link addresses are allocated from here, a /127 per node pair, at the
+	// same slot as the pair's /31.
+	// +kubebuilder:default="fd64:f5ac:e961::/112"
+	// +optional
+	Subnet6 string `json:"subnet6,omitempty"`
 }
 
 // PortMapClassStatus records what each node's agent has done for this class and
@@ -198,6 +210,15 @@ type NodeStatus struct {
 	// naming this node. An interface with no resolvable address is absent.
 	// +optional
 	Addresses map[string]string `json:"addresses,omitempty"`
+
+	// The first global IPv6 address of each of those interfaces that has one,
+	// keyed by interface name. Empty while IPv6 is unavailable on this node.
+	// +optional
+	Addresses6 map[string]string `json:"addresses6,omitempty"`
+
+	// Why this node delivers no IPv6, when it does not. IPv4 is unaffected.
+	// +optional
+	IPv6Unavailable string `json:"ipv6Unavailable,omitempty"`
 }
 
 // +kubebuilder:object:root=true

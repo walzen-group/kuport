@@ -36,6 +36,10 @@ spec:
       name: PUBLISHED
       priority: 1
       type: string
+    - jsonPath: .status.published[*].address6
+      name: PUBLISHED6
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -212,6 +216,11 @@ spec:
                 properties:
                   address:
                     type: string
+                  address6:
+                    description: |-
+                      The same pod's IPv6 address, when the Service has an IPv6 EndpointSlice
+                      and the mapping is delivered over IPv6 as well.
+                    type: string
                   node:
                     type: string
                 required:
@@ -232,6 +241,11 @@ spec:
                     and interface.
                   properties:
                     address:
+                      type: string
+                    address6:
+                      description: |-
+                        The interface's first global IPv6 address, when it has one and the
+                        mapping is delivered over IPv6.
                       type: string
                     interface:
                       type: string

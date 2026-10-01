@@ -12,6 +12,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,6 +88,62 @@ func TestEnvtestClassStatus(t *testing.T) {
 	ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
 	if ready == nil || ready.Reason != v1alpha1.ReasonVxlanPortConflict {
 		t.Errorf("Ready condition = %v, want VxlanPortConflict overlay", ready)
+	}
+}
+
+// TestEnvtestSubnet6 proves the subnet6 schema on a real API server: a vxlan
+// block that leaves it out gets the default, a prefix that is not IPv6 is
+// refused, and so is one holding fewer /127s than subnet holds /31s, since the
+// two are indexed by the same slot.
+func TestEnvtestSubnet6(t *testing.T) {
+	c, stop := startEnv(t)
+	defer stop()
+	ctx := context.Background()
+
+	classWith := func(name string, vx v1alpha1.VxlanConfig) *v1alpha1.PortMapClass {
+		return &v1alpha1.PortMapClass{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.PortMapClassSpec{
+				Nodes:      map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: []string{"eth0"}}},
+				ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan, Vxlan: &vx},
+			},
+		}
+	}
+
+	if err := c.Create(ctx, classWith("defaulted", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24"})); err != nil {
+		t.Fatalf("create class without subnet6: %v", err)
+	}
+	var got v1alpha1.PortMapClass
+	if err := c.Get(ctx, types.NamespacedName{Name: "defaulted"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if s := got.Spec.ReturnPath.Vxlan.Subnet6; s != "fd64:f5ac:e961::/112" {
+		t.Errorf("subnet6 = %q, want the default fd64:f5ac:e961::/112", s)
+	}
+
+	tests := []struct {
+		name    string
+		vx      v1alpha1.VxlanConfig
+		refused bool
+	}{
+		{"ipv4 prefix", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "10.99.0.0/16"}, true},
+		{"not a prefix", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64::1"}, true},
+		// A /24 holds 128 /31s; a /121 holds 64 /127s.
+		{"fewer slots", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64:f5ac:e961::/121"}, true},
+		// A /120 holds 128 /127s, exactly enough.
+		{"as many slots", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64:f5ac:e961::/120"}, false},
+		{"more slots", v1alpha1.VxlanConfig{Subnet: "169.254.79.0/24", Subnet6: "fd64:f5ac:e961::/64"}, false},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := c.Create(ctx, classWith(fmt.Sprintf("case-%d", i), tt.vx))
+			if tt.refused && err == nil {
+				t.Errorf("subnet %s with subnet6 %s was accepted, want it refused", tt.vx.Subnet, tt.vx.Subnet6)
+			}
+			if !tt.refused && err != nil {
+				t.Errorf("subnet %s with subnet6 %s was refused: %v", tt.vx.Subnet, tt.vx.Subnet6, err)
+			}
+		})
 	}
 }
 

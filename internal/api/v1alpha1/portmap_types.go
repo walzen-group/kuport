@@ -100,6 +100,11 @@ type PortMapStatus struct {
 type Endpoint struct {
 	Node    string `json:"node"`
 	Address string `json:"address"`
+
+	// The same pod's IPv6 address, when the Service has an IPv6 EndpointSlice
+	// and the mapping is delivered over IPv6 as well.
+	// +optional
+	Address6 string `json:"address6,omitempty"`
 }
 
 // PublishedAddress is one address the port answers on, on one accepting node
@@ -108,6 +113,11 @@ type PublishedAddress struct {
 	Node      string `json:"node"`
 	Interface string `json:"interface"`
 	Address   string `json:"address"`
+
+	// The interface's first global IPv6 address, when it has one and the
+	// mapping is delivered over IPv6.
+	// +optional
+	Address6 string `json:"address6,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -119,6 +129,7 @@ type PublishedAddress struct {
 // +kubebuilder:printcolumn:name="ENDPOINT",type=string,JSONPath=`.status.endpoint.address`
 // +kubebuilder:printcolumn:name="AGE",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="PUBLISHED",type=string,priority=1,JSONPath=`.status.published[*].address`
+// +kubebuilder:printcolumn:name="PUBLISHED6",type=string,priority=1,JSONPath=`.status.published[*].address6`
 
 // PortMap is a namespaced request to deliver a port on an accepting node to a
 // pod behind a Service in the same namespace.

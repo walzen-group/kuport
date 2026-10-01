@@ -162,8 +162,11 @@ spec:
                     - None
                     type: string
                   vxlan:
-                    description: VxlanConfig sets the parameters of the VXLAN return
-                      links this class builds.
+                    description: |-
+                      VxlanConfig sets the parameters of the VXLAN return links this class builds.
+                      A slot indexes a /31 of subnet and a /127 of subnet6 alike, so subnet6 must
+                      hold at least as many /127s as subnet holds /31s: 127 minus its prefix
+                      length at least 31 minus subnet's.
                     properties:
                       port:
                         default: 4790
@@ -176,11 +179,26 @@ spec:
                         description: Link addresses are allocated from here, a /31
                           per node pair.
                         type: string
+                      subnet6:
+                        default: fd64:f5ac:e961::/112
+                        description: |-
+                          IPv6 link addresses are allocated from here, a /127 per node pair, at the
+                          same slot as the pair's /31.
+                        type: string
                       vni:
                         default: 4242
                         format: int32
                         type: integer
                     type: object
+                    x-kubernetes-validations:
+                    - message: subnet6 must be an IPv6 prefix
+                      rule: '!has(self.subnet6) || (isCIDR(self.subnet6) && cidr(self.subnet6).ip().family()
+                        == 6)'
+                    - message: subnet6 must hold at least as many /127s as subnet
+                        holds /31s
+                      rule: '!has(self.subnet6) || !has(self.subnet) || !isCIDR(self.subnet6)
+                        || !isCIDR(self.subnet) || cidr(self.subnet6).prefixLength()
+                        - cidr(self.subnet).prefixLength() <= 96'
                 required:
                 - mode
                 type: object
@@ -321,6 +339,17 @@ spec:
                         the agent that writes a PortMap's status can fill the published rows
                         naming this node. An interface with no resolvable address is absent.
                       type: object
+                    addresses6:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        The first global IPv6 address of each of those interfaces that has one,
+                        keyed by interface name. Empty while IPv6 is unavailable on this node.
+                      type: object
+                    ipv6Unavailable:
+                      description: Why this node delivers no IPv6, when it does not.
+                        IPv4 is unaffected.
+                      type: string
                     linkMTU:
                       description: |-
                         UnderlayMTU minus the 50-byte VXLAN overhead, which is what this node's
