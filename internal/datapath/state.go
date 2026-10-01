@@ -106,8 +106,12 @@ type IPRule struct {
 	Family Family
 }
 
+// Route is a return table's default route. Its family is the gateway's: an
+// IPv6 route goes via the peer's end of the /127.
 type Route struct {
 	Table uint32
 	Via   netip.Addr
 	Dev   string
 }
+
+func (r Route) family() Family { return familyOf(r.Via) }

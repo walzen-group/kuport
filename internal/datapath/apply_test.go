@@ -134,8 +134,36 @@ func (f *fakeNL) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 	return nil
 }
 
+func (f *fakeNL) AddrDel(link netlink.Link, addr *netlink.Addr) error {
+	f.muts++
+	name := link.Attrs().Name
+	kept := f.addrs[name][:0]
+	for _, a := range f.addrs[name] {
+		if a.IPNet.String() != addr.IPNet.String() {
+			kept = append(kept, a)
+		}
+	}
+	f.addrs[name] = kept
+	return nil
+}
+
+// AddrList answers per family, as the kernel does: AF_INET gives the IPv4
+// addresses, AF_INET6 the IPv6 ones, 0 every address.
 func (f *fakeNL) AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
-	return f.addrs[link.Attrs().Name], nil
+	var out []netlink.Addr
+	for _, a := range f.addrs[link.Attrs().Name] {
+		if family == 0 || addrFamily(a.IP) == family {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func addrFamily(ip net.IP) int {
+	if ip.To4() != nil {
+		return unix.AF_INET
+	}
+	return unix.AF_INET6
 }
 
 func (f *fakeNL) RuleAdd(rule *netlink.Rule) error {
@@ -147,7 +175,8 @@ func (f *fakeNL) RuleAdd(rule *netlink.Rule) error {
 func (f *fakeNL) RuleDel(rule *netlink.Rule) error {
 	f.muts++
 	for i := range f.rules {
-		if f.rules[i].Priority == rule.Priority && f.rules[i].Mark == rule.Mark && f.rules[i].Table == rule.Table {
+		if f.rules[i].Family == rule.Family && f.rules[i].Priority == rule.Priority &&
+			f.rules[i].Mark == rule.Mark && f.rules[i].Table == rule.Table {
 			f.rules = append(f.rules[:i], f.rules[i+1:]...)
 			return nil
 		}
@@ -155,8 +184,15 @@ func (f *fakeNL) RuleDel(rule *netlink.Rule) error {
 	return nil
 }
 
+// RuleList keeps the kernel's split: IPv4 and IPv6 rules are separate lists.
 func (f *fakeNL) RuleList(family int) ([]netlink.Rule, error) {
-	return append([]netlink.Rule(nil), f.rules...), nil
+	var out []netlink.Rule
+	for _, r := range f.rules {
+		if r.Family == family {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeNL) RouteAdd(route *netlink.Route) error {
@@ -179,6 +215,9 @@ func (f *fakeNL) RouteDel(route *netlink.Route) error {
 func (f *fakeNL) RouteListFiltered(family int, filter *netlink.Route, mask uint64) ([]netlink.Route, error) {
 	var out []netlink.Route
 	for _, r := range f.routes {
+		if family != 0 && r.Family != family {
+			continue
+		}
 		if mask&netlink.RT_FILTER_TABLE != 0 && r.Table != filter.Table {
 			continue
 		}

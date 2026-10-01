@@ -190,7 +190,10 @@ func Render(s State) Plan {
 		if a.Mark != b.Mark {
 			return a.Mark < b.Mark
 		}
-		return a.Table < b.Table
+		if a.Table != b.Table {
+			return a.Table < b.Table
+		}
+		return a.Family < b.Family
 	})
 
 	routes := append([]Route(nil), s.Routes...)

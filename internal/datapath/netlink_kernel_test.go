@@ -2,14 +2,18 @@ package datapath
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // netnsMarker is logged by the inner run the moment it is inside the fresh
@@ -27,19 +31,27 @@ const netnsMarker = "KUPT-NS-STARTED"
 // while the device is up. Where the kernel cannot open a netns the test
 // skips.
 func TestApplyLinksUpdatesUnderlayOnRealKernel(t *testing.T) {
+	inNetns(t, "TestApplyLinksUpdatesUnderlayOnRealKernel", applyLinksRealKernel)
+}
+
+// inNetns runs body inside a fresh network namespace by re-executing the test
+// binary under `unshare -rn`, filtered to the named test. The outer run skips
+// where the kernel cannot open a netns and fails when the inner run does.
+func inNetns(t *testing.T, name string, body func(*testing.T)) {
+	t.Helper()
 	if os.Getenv("KUPORT_NETNS_TEST") == "1" {
 		t.Log(netnsMarker)
-		applyLinksRealKernel(t)
+		body(t)
 		return
 	}
 	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare not on PATH; real-kernel link proof skipped")
+		t.Skip("unshare not on PATH; real-kernel proof skipped")
 	}
 	if out, err := exec.Command("unshare", "-rn", "true").CombinedOutput(); err != nil {
 		t.Skipf("cannot open a fresh netns here: %v\n%s", err, out)
 	}
 
-	cmd := exec.Command("unshare", "-rn", os.Args[0], "-test.run=TestApplyLinksUpdatesUnderlayOnRealKernel", "-test.v")
+	cmd := exec.Command("unshare", "-rn", os.Args[0], "-test.run=^"+name+"$", "-test.v")
 	cmd.Env = append(os.Environ(), "KUPORT_NETNS_TEST=1")
 	out, err := cmd.CombinedOutput()
 	if !bytes.Contains(out, []byte(netnsMarker)) {
@@ -49,6 +61,202 @@ func TestApplyLinksUpdatesUnderlayOnRealKernel(t *testing.T) {
 		t.Fatalf("real-kernel run failed: %v\n%s", err, out)
 	}
 	t.Logf("real-kernel run:\n%s", out)
+}
+
+// TestApplyIPv6OnRealKernel applies the dual-stack target plan to a real
+// kernel in a fresh netns, nftables included: the kernel validates every
+// expression of the inet ruleset, the /127 lands on the link, and the IPv6
+// divert rule and return route exist beside the IPv4 ones. A table ip kuport
+// left by an older release is gone after the first pass. An IPv4-only plan
+// then removes every IPv6 object, and Teardown removes the rest.
+func TestApplyIPv6OnRealKernel(t *testing.T) {
+	inNetns(t, "TestApplyIPv6OnRealKernel", applyIPv6RealKernel)
+}
+
+func applyIPv6RealKernel(t *testing.T) {
+	nl := realNetlink{}
+	lo, err := nl.LinkByName("lo")
+	if err != nil {
+		t.Fatalf("lo: %v", err)
+	}
+	if err := nl.LinkSetUp(lo); err != nil {
+		t.Fatalf("lo up: %v", err)
+	}
+	local, err := netlink.ParseAddr("100.64.0.2/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nl.AddrAdd(lo, local); err != nil {
+		t.Fatalf("addr add: %v", err)
+	}
+
+	conn, err := nftables.New()
+	if err != nil {
+		t.Fatalf("nftables: %v", err)
+	}
+	// The table an older release wrote.
+	conn.AddTable(legacyTable())
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("seed table ip kuport: %v", err)
+	}
+	h := Handles{NFT: conn, NL: nl}
+
+	if err := Apply(context.Background(), Render(dualStackTargetState(t)), h); err != nil {
+		t.Fatalf("dual-stack apply: %v", err)
+	}
+	if tables := kuportTables(t, conn); !reflect.DeepEqual(tables, []string{"inet"}) {
+		t.Errorf("kuport tables after apply = %v, want [inet]: the ip table is migrated away", tables)
+	}
+	if n := inetRuleCount(t, conn); n != 4 {
+		t.Errorf("rules in table inet kuport = %d, want 4 (two exemptions, two marks)", n)
+	}
+
+	link, err := nl.LinkByName("kup-da0d9a1d")
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if !kernelHasAddr(t, nl, link, "fd64:f5ac:e961::1/127") {
+		t.Error("the /127 is not on the link")
+	}
+	if !kernelHasRule(t, nl, unix.AF_INET6, 102, 0x6b700001, 200) {
+		t.Error("no ipv6 divert rule at pref 102")
+	}
+	if !kernelHasRoute(t, nl, unix.AF_INET6, 200, "fd64:f5ac:e961::") {
+		t.Error("no ipv6 default route in table 200")
+	}
+
+	if err := Apply(context.Background(), Render(targetRemoteState(t)), h); err != nil {
+		t.Fatalf("ipv4 apply: %v", err)
+	}
+	if kernelHasAddr(t, nl, link, "fd64:f5ac:e961::1/127") {
+		t.Error("the /127 outlived the plan that wanted it")
+	}
+	if kernelHasRule(t, nl, unix.AF_INET6, 102, 0x6b700001, 200) {
+		t.Error("the ipv6 divert rule outlived the plan that wanted it")
+	}
+	if kernelHasRoute(t, nl, unix.AF_INET6, 200, "fd64:f5ac:e961::") {
+		t.Error("the ipv6 return route outlived the plan that wanted it")
+	}
+	if !kernelHasRule(t, nl, unix.AF_INET, 102, 0x6b700001, 200) {
+		t.Error("the ipv4 divert rule went with the ipv6 one")
+	}
+
+	// Every golden case through the kernel, which rejects an expression whose
+	// register width, offset or NAT family does not fit: the DNAT rules in
+	// both families, the link DNAT, the conntrack save and restore. The links
+	// stay out: the multi case gives two of them one VNI, which the golden
+	// does not care about and the kernel refuses.
+	for _, c := range cases() {
+		s := c.state
+		plan := Render(State{DNAT: s.DNAT, Exempt: s.Exempt, Mark: s.Mark, CtSave: s.CtSave, CtLoad: s.CtLoad})
+		if err := Apply(context.Background(), plan, h); err != nil {
+			t.Errorf("%s: apply: %v", c.name, err)
+			continue
+		}
+		if n := inetRuleCount(t, conn); n != len(plan.Rules) {
+			t.Errorf("%s: kernel holds %d rules, plan has %d", c.name, n, len(plan.Rules))
+		}
+	}
+
+	if err := Apply(context.Background(), Render(dualStackTargetState(t)), h); err != nil {
+		t.Fatalf("second dual-stack apply: %v", err)
+	}
+	if err := Teardown(context.Background(), h); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if tables := kuportTables(t, conn); len(tables) != 0 {
+		t.Errorf("kuport tables after teardown = %v, want none", tables)
+	}
+	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+		rules, err := nl.RuleList(fam)
+		if err != nil {
+			t.Fatalf("rule list: %v", err)
+		}
+		for _, r := range rules {
+			if r.Mark&ownedMarkMask == ownedMarkValue {
+				t.Errorf("family %d rule %+v outlived teardown", fam, r)
+			}
+		}
+	}
+}
+
+// kuportTables names the families that hold a table called kuport.
+func kuportTables(t *testing.T, conn *nftables.Conn) []string {
+	t.Helper()
+	tables, err := conn.ListTables()
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var out []string
+	for _, tb := range tables {
+		if tb.Name != TableName {
+			continue
+		}
+		switch tb.Family {
+		case nftables.TableFamilyINet:
+			out = append(out, "inet")
+		case nftables.TableFamilyIPv4:
+			out = append(out, "ip")
+		default:
+			out = append(out, "other")
+		}
+	}
+	return out
+}
+
+func inetRuleCount(t *testing.T, conn *nftables.Conn) int {
+	t.Helper()
+	n := 0
+	for _, c := range nftChains(nftTable()) {
+		rules, err := conn.GetRules(nftTable(), c)
+		if err != nil {
+			t.Fatalf("rules of %s: %v", c.Name, err)
+		}
+		n += len(rules)
+	}
+	return n
+}
+
+func kernelHasAddr(t *testing.T, nl NetlinkConn, link netlink.Link, cidr string) bool {
+	t.Helper()
+	addrs, err := nl.AddrList(link, unix.AF_INET6)
+	if err != nil {
+		t.Fatalf("addr list: %v", err)
+	}
+	for _, a := range addrs {
+		if a.IPNet.String() == cidr {
+			return true
+		}
+	}
+	return false
+}
+
+func kernelHasRule(t *testing.T, nl NetlinkConn, family, pref int, mark uint32, table int) bool {
+	t.Helper()
+	rules, err := nl.RuleList(family)
+	if err != nil {
+		t.Fatalf("rule list: %v", err)
+	}
+	for _, r := range rules {
+		if r.Priority == pref && r.Mark == mark && r.Table == table {
+			return true
+		}
+	}
+	return false
+}
+
+func kernelHasRoute(t *testing.T, nl NetlinkConn, family, table int, via string) bool {
+	t.Helper()
+	routes, err := nl.RouteListFiltered(family, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatalf("route list: %v", err)
+	}
+	for _, r := range routes {
+		if r.Gw.Equal(net.ParseIP(via)) {
+			return true
+		}
+	}
+	return false
 }
 
 // liveUnderlay reads back the kernel's view of the link and re-pins the

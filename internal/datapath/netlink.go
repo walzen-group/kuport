@@ -1,6 +1,7 @@
 package datapath
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -272,6 +273,11 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 			}
 			existing.Attrs().MTU = int(l.MTU)
 		}
+		// After the MTU: the kernel refuses an IPv6 address on a device below
+		// 1280, so a device growing past that takes its /127 in the same pass.
+		if err := applyLinkAddr6(nl, existing, l); err != nil {
+			return err
+		}
 		if existing.Attrs().Flags&net.FlagUp == 0 {
 			if err := nl.LinkSetUp(existing); err != nil {
 				return fmt.Errorf("bring link %s up: %w", l.Name, err)
@@ -294,70 +300,104 @@ func applyLinks(nl NetlinkConn, links []Link) error {
 	return nil
 }
 
-// applyRules reconciles the routing rules: add the missing, and remove any rule
-// carrying a kuport-owned mark that the plan no longer wants.
-func applyRules(nl NetlinkConn, rules []IPRule) error {
-	existing, err := nl.RuleList(unix.AF_INET)
+// applyLinkAddr6 brings a link's IPv6 addresses to the plan: the /127 when the
+// plan sets one, and nothing else global. A /127 left by a changed subnet6, or
+// by a node that stopped delivering IPv6, is removed. The link-local address
+// the kernel gives every IPv6 device is left alone.
+func applyLinkAddr6(nl NetlinkConn, link netlink.Link, l Link) error {
+	have, err := nl.AddrList(link, unix.AF_INET6)
 	if err != nil {
+		if !l.LinkAddr6.IsValid() && ipv6Absent(err) {
+			return nil
+		}
 		return err
 	}
-	desired := make([]*netlink.Rule, 0, len(rules))
-	for _, r := range rules {
-		desired = append(desired, toNLRule(r))
-	}
-
-	for _, d := range desired {
-		if !ruleListed(existing, d) {
-			if err := nl.RuleAdd(d); err != nil {
-				return fmt.Errorf("add rule pref %d mark %#x table %d: %w",
-					d.Priority, d.Mark, d.Table, err)
-			}
+	var want *netlink.Addr
+	if l.LinkAddr6.IsValid() {
+		if want, err = netlink.ParseAddr(l.LinkAddr6.String()); err != nil {
+			return err
 		}
 	}
-	for i := range existing {
-		e := &existing[i]
-		if e.Mark&ownedMarkMask != ownedMarkValue {
+	for i := range have {
+		a := &have[i]
+		if a.IPNet == nil || a.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		if !ruleWanted(desired, e) {
-			if err := nl.RuleDel(e); err != nil {
-				return err
-			}
+		if want != nil && a.IPNet.String() == want.IPNet.String() {
+			continue
+		}
+		if err := nl.AddrDel(link, a); err != nil {
+			return fmt.Errorf("remove stale address %s from link %s: %w", a.IPNet, l.Name, err)
+		}
+	}
+	if want != nil && !addrPresent(have, want) {
+		if err := nl.AddrAdd(link, want); err != nil {
+			return fmt.Errorf("address %s on link %s: %w", l.LinkAddr6, l.Name, err)
 		}
 	}
 	return nil
 }
 
-// applyRoutes reconciles the per-table default routes. It only touches the
-// tables the plan names, so it never disturbs another table's routes.
-func applyRoutes(nl NetlinkConn, routes []Route) error {
-	byTable := map[uint32][]*netlink.Route{}
-	for _, r := range routes {
-		nlr, err := toNLRoute(nl, r)
-		if err != nil {
-			return err
-		}
-		byTable[r.Table] = append(byTable[r.Table], nlr)
-	}
+// ipv6Absent reports an error that means the kernel has no IPv6 at all, as on
+// a node booted with ipv6.disable=1. A plan without IPv6 objects has nothing
+// to reconcile there, so the error is not a failure for it.
+func ipv6Absent(err error) bool {
+	return errors.Is(err, unix.EAFNOSUPPORT)
+}
 
-	for table, desired := range byTable {
-		filter := &netlink.Route{Table: int(table)}
-		existing, err := nl.RouteListFiltered(unix.AF_INET, filter, netlink.RT_FILTER_TABLE)
+// families are the address families the netlink reconcile walks, each with its
+// own rule list and its own routing tables in the kernel.
+var families = []Family{FamilyIPv4, FamilyIPv6}
+
+// afOf is a Family's socket address family.
+func afOf(f Family) int {
+	if f == FamilyIPv6 {
+		return unix.AF_INET6
+	}
+	return unix.AF_INET
+}
+
+func familyName(f Family) string {
+	if f == FamilyIPv6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
+// applyRules reconciles the routing rules, one family at a time: add the
+// missing, and remove any rule carrying a kuport-owned mark that the plan no
+// longer wants.
+func applyRules(nl NetlinkConn, rules []IPRule) error {
+	for _, fam := range families {
+		desired := make([]*netlink.Rule, 0, len(rules))
+		for _, r := range rules {
+			if r.Family == fam {
+				desired = append(desired, toNLRule(r))
+			}
+		}
+		existing, err := nl.RuleList(afOf(fam))
 		if err != nil {
+			if len(desired) == 0 && ipv6Absent(err) {
+				continue
+			}
 			return err
 		}
+
 		for _, d := range desired {
-			if !routeListed(existing, d) {
-				if err := nl.RouteAdd(d); err != nil {
-					return fmt.Errorf("add route in table %d via %s dev index %d: %w",
-						table, d.Gw, d.LinkIndex, err)
+			if !ruleListed(existing, d) {
+				if err := nl.RuleAdd(d); err != nil {
+					return fmt.Errorf("add %s rule pref %d mark %#x table %d: %w",
+						familyName(fam), d.Priority, d.Mark, d.Table, err)
 				}
 			}
 		}
 		for i := range existing {
 			e := &existing[i]
-			if !routeWanted(desired, e) {
-				if err := nl.RouteDel(e); err != nil {
+			if e.Mark&ownedMarkMask != ownedMarkValue {
+				continue
+			}
+			if !ruleWanted(desired, e) {
+				if err := nl.RuleDel(e); err != nil {
 					return err
 				}
 			}
@@ -366,7 +406,60 @@ func applyRoutes(nl NetlinkConn, routes []Route) error {
 	return nil
 }
 
-// teardownNetlink removes kuport's routes, rules and links by name and mark.
+// applyRoutes reconciles the per-table default routes. It only touches the
+// tables the plan names, so it never disturbs another table's routes. The
+// kernel keeps a table's IPv4 and IPv6 routes apart, and each table the plan
+// names is reconciled in both, so a table that stopped carrying IPv6 loses
+// its IPv6 route while the IPv4 one stays.
+func applyRoutes(nl NetlinkConn, routes []Route) error {
+	byTable := map[uint32]map[Family][]*netlink.Route{}
+	var tables []uint32
+	for _, r := range routes {
+		nlr, err := toNLRoute(nl, r)
+		if err != nil {
+			return err
+		}
+		if byTable[r.Table] == nil {
+			byTable[r.Table] = map[Family][]*netlink.Route{}
+			tables = append(tables, r.Table)
+		}
+		byTable[r.Table][r.family()] = append(byTable[r.Table][r.family()], nlr)
+	}
+
+	for _, table := range tables {
+		for _, fam := range families {
+			desired := byTable[table][fam]
+			filter := &netlink.Route{Table: int(table)}
+			existing, err := nl.RouteListFiltered(afOf(fam), filter, netlink.RT_FILTER_TABLE)
+			if err != nil {
+				if len(desired) == 0 && ipv6Absent(err) {
+					continue
+				}
+				return err
+			}
+			for _, d := range desired {
+				if !routeListed(existing, d) {
+					if err := nl.RouteAdd(d); err != nil {
+						return fmt.Errorf("add %s route in table %d via %s dev index %d: %w",
+							familyName(fam), table, d.Gw, d.LinkIndex, err)
+					}
+				}
+			}
+			for i := range existing {
+				e := &existing[i]
+				if !routeWanted(desired, e) {
+					if err := nl.RouteDel(e); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// teardownNetlink removes kuport's routes, rules and links by name and mark,
+// in both families.
 func teardownNetlink(nl NetlinkConn) error {
 	all, err := nl.LinkList()
 	if err != nil {
@@ -376,14 +469,19 @@ func teardownNetlink(nl NetlinkConn) error {
 		if !strings.HasPrefix(l.Attrs().Name, linkPrefix) {
 			continue
 		}
-		routes, err := nl.RouteListFiltered(unix.AF_INET,
-			&netlink.Route{LinkIndex: l.Attrs().Index}, netlink.RT_FILTER_OIF)
-		if err != nil {
-			return err
-		}
-		for i := range routes {
-			if err := nl.RouteDel(&routes[i]); err != nil {
+		for _, fam := range families {
+			routes, err := nl.RouteListFiltered(afOf(fam),
+				&netlink.Route{LinkIndex: l.Attrs().Index}, netlink.RT_FILTER_OIF)
+			if err != nil {
+				if ipv6Absent(err) {
+					continue
+				}
 				return err
+			}
+			for i := range routes {
+				if err := nl.RouteDel(&routes[i]); err != nil {
+					return err
+				}
 			}
 		}
 		if err := nl.LinkDel(l); err != nil {
@@ -391,27 +489,34 @@ func teardownNetlink(nl NetlinkConn) error {
 		}
 	}
 
-	rules, err := nl.RuleList(unix.AF_INET)
-	if err != nil {
-		return err
-	}
-	for i := range rules {
-		if rules[i].Mark&ownedMarkMask == ownedMarkValue {
-			if err := nl.RuleDel(&rules[i]); err != nil {
-				return err
+	for _, fam := range families {
+		rules, err := nl.RuleList(afOf(fam))
+		if err != nil {
+			if ipv6Absent(err) {
+				continue
+			}
+			return err
+		}
+		for i := range rules {
+			if rules[i].Mark&ownedMarkMask == ownedMarkValue {
+				if err := nl.RuleDel(&rules[i]); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// toNLRule maps a kuport IPRule to a netlink rule.
+// toNLRule maps a kuport IPRule to a netlink rule. The family is set even on
+// the divert rule, which names no address: without it the library sends an
+// IPv4 rule, and the IPv6 divert collides with its IPv4 twin.
 func toNLRule(r IPRule) *netlink.Rule {
 	nlr := netlink.NewRule()
 	nlr.Priority = int(r.Pref)
 	nlr.Mark = r.Mark
 	nlr.Table = int(r.Table)
-	nlr.Family = unix.AF_INET
+	nlr.Family = afOf(r.Family)
 	if r.To != nil {
 		p := *r.To
 		nlr.Dst = &net.IPNet{
@@ -432,7 +537,7 @@ func toNLRoute(nl NetlinkConn, r Route) (*netlink.Route, error) {
 		Table:     int(r.Table),
 		Gw:        net.IP(r.Via.AsSlice()),
 		LinkIndex: link.Attrs().Index,
-		Family:    unix.AF_INET,
+		Family:    afOf(r.family()),
 	}, nil
 }
 
@@ -553,6 +658,10 @@ func (realNetlink) LinkSetUnderlay(idx int, name string, local, remote net.IP) e
 
 func (realNetlink) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrAdd(link, addr)
+}
+
+func (realNetlink) AddrDel(link netlink.Link, addr *netlink.Addr) error {
+	return netlink.AddrDel(link, addr)
 }
 
 func (realNetlink) AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
