@@ -14,9 +14,12 @@ generate:
 manifests:
 	$(CONTROLLER_GEN) crd paths=./internal/api/... output:crd:dir=config/crd
 
-## verify: regenerate CRDs into .tmp/ and fail on any drift from config/crd.
+## verify: regenerate CRDs into .tmp/ and fail on any drift from config/crd,
+## and on any drift of the hand-kept copies in deploy/crds and chart/crds.
 verify:
 	rm -rf .tmp/crd
 	mkdir -p .tmp/crd
 	$(CONTROLLER_GEN) crd paths=./internal/api/... output:crd:dir=.tmp/crd
 	diff -ru config/crd .tmp/crd
+	diff -ru --exclude=kustomization.yaml config/crd deploy/crds
+	diff -ru config/crd chart/crds

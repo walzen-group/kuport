@@ -129,14 +129,18 @@ GitHub Actions.
 `go test ./... -race`, `golangci-lint run`, and `go build ./...` under
 `nix develop -c`, so CI and a developer shell use the same toolchain. A second
 job runs `make verify`, which regenerates the CRDs and fails on any diff against
-committed `config/crd/`, so generated files cannot drift. A third job runs the
+committed `config/crd/`, `deploy/crds/` or `chart/crds/`, so generated files and
+their copies cannot drift. A third job runs the
 envtest tier against a real API server, with the kubebuilder assets pinned to
 1.37.0. A fourth builds the image for linux/amd64 without pushing, and a fifth
 lints and renders the Helm chart and dry-run applies the render against the API
 schemas.
 
-`chart/crds/` is a hand-kept copy of `config/crd/`. `make manifests` writes only
-the latter, so a schema change needs the copy updated as well.
+`chart/crds/` and `deploy/crds/` are hand-kept copies of `config/crd/`.
+`make manifests` writes only `config/crd/`, so a schema change needs
+`cp config/crd/*.yaml chart/crds/ deploy/crds/` as well, and `make verify` fails
+until both copies match. The release renders its install manifest from
+`deploy/`, and v0.6.0 shipped the v0.5.0 schema because that copy was missed.
 
 **release.yaml**, on a tag matching `v*` (plain semver; suffixes are rejected):
 build and push the image to `ghcr.io/walzen-group/kuport-agent`, tagged with the
