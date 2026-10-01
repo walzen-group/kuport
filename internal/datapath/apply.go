@@ -19,7 +19,6 @@ import (
 // root and no kernel.
 type NFTConn interface {
 	AddTable(t *nftables.Table) *nftables.Table
-	FlushTable(t *nftables.Table)
 	AddChain(c *nftables.Chain) *nftables.Chain
 	AddRule(r *nftables.Rule) *nftables.Rule
 	DelTable(t *nftables.Table)

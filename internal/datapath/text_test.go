@@ -140,7 +140,7 @@ func TestTableHeaders(t *testing.T) {
 	for _, want := range []string{
 		"table inet kuport {",
 		"chain kup-pre {",
-		"type nat hook prerouting priority dstnat - 10; policy accept;",
+		"type nat hook prerouting priority dstnat - 20; policy accept;",
 		"chain kup-post {",
 		"type nat hook postrouting priority srcnat - 10; policy accept;",
 		"chain kup-mangle {",

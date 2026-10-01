@@ -90,7 +90,7 @@ the packet.
 ```
 table inet kuport {
   chain kup-pre {
-    type nat hook prerouting priority dstnat - 10; policy accept;
+    type nat hook prerouting priority dstnat - 20; policy accept;
     meta nfproto ipv4 iifname "<iface>" <proto> dport <port> counter dnat ip to <target>:<target port>
     meta nfproto ipv6 iifname "<iface>" <proto> dport <port> counter dnat ip6 to [<target6>]:<target port>
     ...one per interface per family per mapping...
@@ -106,6 +106,15 @@ table inet kuport {
 
 The `ip6` lines exist only for a mapping delivered over IPv6, which
 [IPv6](#ipv6) covers.
+
+kup-pre hooks at `dstnat - 20`, which is priority -120. kube-proxy translates
+at -100, and Talos's ingress firewall in block mode adds a prerouting filter at
+-110 that drops a new connection to one of the node's own addresses unless a
+rule opens its port. kuport translates first, so by the time that filter runs
+the destination is `<target>`, which is no node address, and the filter accepts
+it. A mapping on a firewalled node therefore needs no firewall rule of its own.
+Releases up to v0.6.1 hooked at `dstnat - 10`, the same priority as that filter,
+which leaves the order between the two undefined.
 
 `<target>` is the pod's address when the pod is on this node, and the far end of
 this node's link to the pod's node when it is not. `<egress dev>` follows it:
@@ -149,7 +158,7 @@ masquerade rules does not break it.
 ```
 table inet kuport {
   chain kup-pre {
-    type nat hook prerouting priority dstnat - 10; policy accept;
+    type nat hook prerouting priority dstnat - 20; policy accept;
     iifname "kup-<peer>" ip daddr <this end of that /31> <proto> dport <port> counter dnat ip to <pod ip>:<pod port>
     iifname "kup-<peer>" ip6 daddr <this end of that /127> <proto> dport <port> counter dnat ip6 to [<pod ip6>]:<pod port>
     ...one per link per family...
@@ -312,7 +321,7 @@ node-a, the accepting node:
 ```
 table inet kuport {
 	chain kup-pre {
-		type nat hook prerouting priority dstnat - 10; policy accept;
+		type nat hook prerouting priority dstnat - 20; policy accept;
 		meta nfproto ipv4 iifname "eth0" tcp dport 3000 counter dnat ip to 169.254.77.1:3000
 		meta nfproto ipv6 iifname "eth0" tcp dport 3000 counter dnat ip6 to [fd64:f5ac:e961::1]:3000
 	}
@@ -332,7 +341,7 @@ node-b, the pod's node:
 ```
 table inet kuport {
 	chain kup-pre {
-		type nat hook prerouting priority dstnat - 10; policy accept;
+		type nat hook prerouting priority dstnat - 20; policy accept;
 		iifname "kup-8544dc0e" ip daddr 169.254.77.1 tcp dport 3000 counter dnat ip to 10.244.5.5:3000
 		iifname "kup-8544dc0e" ip6 daddr fd64:f5ac:e961::1 tcp dport 3000 counter dnat ip6 to [fd00:10:244:5::5]:3000
 	}

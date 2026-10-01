@@ -105,7 +105,7 @@ type chainDef struct {
 
 // chains are rendered in this fixed order.
 var chains = []chainDef{
-	{ChainPre, "type nat hook prerouting priority dstnat - 10; policy accept;"},
+	{ChainPre, "type nat hook prerouting priority dstnat - 20; policy accept;"},
 	{ChainPost, "type nat hook postrouting priority srcnat - 10; policy accept;"},
 	{ChainMangle, "type filter hook prerouting priority mangle + 10; policy accept;"},
 }

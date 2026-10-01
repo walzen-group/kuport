@@ -1,6 +1,6 @@
 table inet kuport {
 	chain kup-pre {
-		type nat hook prerouting priority dstnat - 10; policy accept;
+		type nat hook prerouting priority dstnat - 20; policy accept;
 		iifname "kup-da0d9a1d" ip daddr 169.254.77.1 udp dport 3000 counter dnat ip to 10.244.18.107:3000
 		iifname "kup-da0d9a1d" ip6 daddr fd64:f5ac:e961::1 udp dport 3000 counter dnat ip6 to [fd00:10:244:12::6b]:3000
 		iifname "kup-e5b1c204" ip daddr 169.254.77.3 udp dport 3000 counter dnat ip to 10.244.18.107:3000

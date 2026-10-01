@@ -33,7 +33,7 @@ func delTable(conn NFTConn, t *nftables.Table) {
 }
 
 // nftChains returns the three base chains in fixed order, hooked and prioritised
-// exactly as the golden headers describe: dstnat-10, srcnat-10, mangle+10.
+// exactly as the golden headers describe: dstnat-20, srcnat-10, mangle+10.
 func nftChains(t *nftables.Table) []*nftables.Chain {
 	accept := nftables.ChainPolicyAccept
 	return []*nftables.Chain{
@@ -42,7 +42,7 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 			Table:    t,
 			Type:     nftables.ChainTypeNAT,
 			Hooknum:  nftables.ChainHookPrerouting,
-			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest - 10),
+			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest - 20),
 			Policy:   &accept,
 		},
 		{
@@ -317,15 +317,17 @@ func ctLoadExprs() []expr.Any {
 }
 
 // applyNFT writes the whole kuport table in one transaction: remove a leftover
-// ip table, add the inet table, flush it, add the chains and rules, then flush
-// the connection. Rewriting the entire table each pass is what makes a deleted
-// mapping disappear by absence.
+// ip table, delete and re-add the inet table, add the chains and rules, then
+// flush the connection. Rewriting the entire table each pass is what makes a
+// deleted mapping disappear by absence. The table is deleted rather than
+// flushed because the kernel refuses to change a live base chain's hook or
+// priority, which is what moving kup-pre from dstnat - 10 to dstnat - 20 did.
 func applyNFT(conn NFTConn, plan Plan) error {
 	delTable(conn, legacyTable())
 
 	t := nftTable()
+	delTable(conn, t)
 	conn.AddTable(t)
-	conn.FlushTable(t)
 
 	chainObjs := map[string]*nftables.Chain{}
 	for _, c := range nftChains(t) {

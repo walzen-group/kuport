@@ -41,12 +41,14 @@ func (f *fakeNFT) AddTable(t *nftables.Table) *nftables.Table {
 	f.tableOps = append(f.tableOps, tableOp("add", t))
 	return t
 }
-func (f *fakeNFT) FlushTable(t *nftables.Table)               { f.staged = 0 }
 func (f *fakeNFT) AddChain(c *nftables.Chain) *nftables.Chain { return c }
 func (f *fakeNFT) AddRule(r *nftables.Rule) *nftables.Rule    { f.staged++; return r }
 func (f *fakeNFT) DelTable(t *nftables.Table) {
 	f.tableDels++
 	f.tableOps = append(f.tableOps, tableOp("del", t))
+	if t.Family == nftables.TableFamilyINet {
+		f.staged = 0
+	}
 }
 func (f *fakeNFT) Flush() error { f.committed = f.staged; f.flushes++; return nil }
 
@@ -323,9 +325,9 @@ func TestApplyRemovesLegacyTable(t *testing.T) {
 	if err := Apply(context.Background(), Render(targetRemoteState(t)), h); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	// The ip table is added and deleted, so the delete cannot fail on a node
-	// that never had one, then the inet table is written.
-	want := []string{"add ip kuport", "del ip kuport", "add inet kuport"}
+	// Each table is added before it is deleted, so the delete cannot fail on a
+	// node that never had one. The inet table is then written again from empty.
+	want := []string{"add ip kuport", "del ip kuport", "add inet kuport", "del inet kuport", "add inet kuport"}
 	if !reflect.DeepEqual(nft.tableOps, want) {
 		t.Errorf("table operations = %v, want %v", nft.tableOps, want)
 	}

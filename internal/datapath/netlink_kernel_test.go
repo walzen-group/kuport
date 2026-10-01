@@ -180,6 +180,57 @@ func applyIPv6RealKernel(t *testing.T) {
 	}
 }
 
+// TestApplyMovesChainPriorityOnRealKernel seeds table inet kuport the way
+// v0.6.1 left it, with kup-pre at dstnat - 10, and shows one apply moves the
+// chain to dstnat - 20, ahead of a host firewall's prerouting filter at
+// dstnat - 10. The kernel refuses to change a live base chain's priority in
+// place, so this only passes when the apply replaces the table.
+func TestApplyMovesChainPriorityOnRealKernel(t *testing.T) {
+	inNetns(t, "TestApplyMovesChainPriorityOnRealKernel", applyMovesChainPriorityRealKernel)
+}
+
+func applyMovesChainPriorityRealKernel(t *testing.T) {
+	conn, err := nftables.New()
+	if err != nil {
+		t.Fatalf("nftables: %v", err)
+	}
+	accept := nftables.ChainPolicyAccept
+	old := nftTable()
+	conn.AddTable(old)
+	conn.AddChain(&nftables.Chain{
+		Name:     ChainPre,
+		Table:    old,
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest - 10),
+		Policy:   &accept,
+	})
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("seed the v0.6.1 table: %v", err)
+	}
+
+	h := Handles{NFT: conn, NL: realNetlink{}}
+	plan := Render(State{DNAT: targetRemoteState(t).DNAT})
+	if err := Apply(context.Background(), plan, h); err != nil {
+		t.Fatalf("apply over the v0.6.1 table: %v", err)
+	}
+
+	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
+	if err != nil {
+		t.Fatalf("list chains: %v", err)
+	}
+	for _, c := range chains {
+		if c.Table.Name != TableName || c.Name != ChainPre {
+			continue
+		}
+		if want := *nftables.ChainPriorityNATDest - 20; *c.Priority != want {
+			t.Errorf("%s priority = %d, want %d", ChainPre, *c.Priority, want)
+		}
+		return
+	}
+	t.Fatalf("no chain %s in table inet %s after apply", ChainPre, TableName)
+}
+
 // kuportTables names the families that hold a table called kuport.
 func kuportTables(t *testing.T, conn *nftables.Conn) []string {
 	t.Helper()
