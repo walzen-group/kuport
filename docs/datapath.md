@@ -1,8 +1,10 @@
 # Datapath
 
-Every rule here carried real traffic on a live cluster before it was written
-down, and each one names the measurement that confirmed it. Several of them
-contradict what the documentation suggests, which is why the measurements stay.
+Every IPv4 rule here carried real traffic on a live cluster before it was
+written down, and each one names the measurement that confirmed it. Several of
+them contradict what the documentation suggests, which is why the measurements
+stay. The IPv6 rules in [IPv6](#ipv6) have been loaded into a kernel by the
+datapath tests and have not yet carried traffic on a cluster.
 
 Two shapes cover everything: the pod sits on the node that accepted the packet,
 or it does not.
@@ -86,19 +88,24 @@ the packet.
 ## Rules on an accepting node
 
 ```
-table ip kuport {
+table inet kuport {
   chain kup-pre {
     type nat hook prerouting priority dstnat - 10; policy accept;
-    iifname "<iface>" <proto> dport <port> counter dnat to <target>:<target port>
-    ...one per interface per mapping...
+    meta nfproto ipv4 iifname "<iface>" <proto> dport <port> counter dnat ip to <target>:<target port>
+    meta nfproto ipv6 iifname "<iface>" <proto> dport <port> counter dnat ip6 to [<target6>]:<target port>
+    ...one per interface per family per mapping...
   }
 
   chain kup-post {
     type nat hook postrouting priority srcnat - 10; policy accept;
-    oifname "<egress dev>" ip daddr <target> <proto> dport <target port> counter snat to ip saddr
+    oifname "<egress dev>" ip daddr <target> <proto> dport <target port> counter snat ip to ip saddr
+    oifname "<egress dev>" ip6 daddr <target6> <proto> dport <target port> counter snat ip6 to ip6 saddr
   }
 }
 ```
+
+The `ip6` lines exist only for a mapping delivered over IPv6, which
+[IPv6](#ipv6) covers.
 
 `<target>` is the pod's address when the pod is on this node, and the far end of
 this node's link to the pod's node when it is not. `<egress dev>` follows it:
@@ -112,7 +119,7 @@ matching `<port>` there would miss a translated packet and leave it to the CNI's
 masquerade, which replaces the client's address.
 
 A mapping with a port range renders one rule with a range match instead:
-`udp dport 27015-27115 counter dnat to 10.244.18.107:27015-27115`. The golden
+`udp dport 27015-27115 counter dnat ip to 10.244.18.107:27015-27115`. The golden
 rulesets in `internal/datapath/testdata/` are the rendered truth.
 
 The postrouting rule is an identity SNAT, and its job is to claim the connection
@@ -140,16 +147,18 @@ masquerade rules does not break it.
 ## Rules on the pod's node
 
 ```
-table ip kuport {
+table inet kuport {
   chain kup-pre {
     type nat hook prerouting priority dstnat - 10; policy accept;
-    iifname "kup-<peer>" ip daddr <this end of that /31> <proto> dport <port> counter dnat to <pod ip>:<pod port>
-    ...one per link...
+    iifname "kup-<peer>" ip daddr <this end of that /31> <proto> dport <port> counter dnat ip to <pod ip>:<pod port>
+    iifname "kup-<peer>" ip6 daddr <this end of that /127> <proto> dport <port> counter dnat ip6 to [<pod ip6>]:<pod port>
+    ...one per link per family...
   }
 
   chain kup-post {
     type nat hook postrouting priority srcnat - 10; policy accept;
-    oifname != "cilium_*" ip saddr <pod ip> <proto> sport <pod port> counter snat to ip saddr
+    oifname != "cilium_*" ip saddr <pod ip> <proto> sport <pod port> counter snat ip to ip saddr
+    oifname != "cilium_*" ip6 saddr <pod ip6> <proto> sport <pod port> counter snat ip6 to ip6 saddr
   }
 
   chain kup-mangle {
@@ -160,10 +169,17 @@ table ip kuport {
 ```
 
 ```
-ip rule  add pref 101 fwmark <mark> to <peer node address>/32 lookup main
-ip rule  add pref 102 fwmark <mark> lookup <table>
-ip route add default via <peer's link address> dev <link> table <table>
+ip rule     add pref 101 fwmark <mark> to <peer node address>/32 lookup main
+ip rule     add pref 102 fwmark <mark> lookup <table>
+ip route    add default via <peer's link address> dev <link> table <table>
+ip -6 rule  add pref 102 fwmark <mark> lookup <table>
+ip -6 route add default via <peer's IPv6 link address> dev <link> table <table>
 ```
+
+The `ip6` rules and the two `-6` commands exist only for a mapping delivered
+over IPv6. They reuse the mark and the table of the IPv4 ones; the kernel
+keeps a table's IPv4 and IPv6 routes apart, so table 200 holds one default
+route in each family.
 
 The prerouting rule matches the arrival device and this node's own end of that
 link, which keeps it to kuport's own traffic rather than anything else that
@@ -213,6 +229,7 @@ flowchart TD
 ip link add <name> type vxlan id <vni> local <own address> remote <peer address> \
   dstport <port> ttl 64 mtu <link mtu>
 ip addr add <link address>/31 dev <name>
+ip -6 addr add <link address6>/127 dev <name>
 ip link set <name> up
 ```
 
@@ -220,7 +237,10 @@ The device name is `kup-` plus the first eight hex digits of sha256 of the class
 name and the peer's node name, so both ends independently name the same device
 and two classes over one node pair do not collide. The two addresses of the /31
 are fixed by the sorted pair: the alphabetically first node takes the lower
-address.
+address. The /127 comes from `returnPath.vxlan.subnet6` at the same slot and
+splits the same way, so slot 7 of fd64:f5ac:e961::/112 gives the first node
+fd64:f5ac:e961::e and the second fd64:f5ac:e961::f. The device holds the /127
+only while a mapping over it is delivered over IPv6.
 
 The VNI is the class's base plus the slot, because the kernel keys a vxlan device
 by VNI and destination port, so two links on one node cannot share both.
@@ -230,6 +250,132 @@ key material is involved and nothing needs renewing. Measured: 12ms across two
 sites on the first try.
 
 The port must differ from the CNI's, 8472 for Cilium.
+
+## IPv6
+
+A mapping is delivered over IPv6 as well when its Service has an IPv6
+EndpointSlice listing the chosen pod; [api.md](api.md#ipv6) says which Services
+that covers. The IPv4 slices still choose the pod. The agent then looks that
+pod up in the IPv6 slice by the endpoint's targetRef (kind, namespace and
+name), so both families reach the same pod, and it ignores an IPv6 endpoint of
+any other pod.
+
+### One table for both families
+
+kuport writes one `table inet kuport`, with the chains, hooks and priorities
+the IPv4 table had. An inet chain sees packets of both families, and a payload
+match reads fixed byte offsets whatever the packet is: the IPv4 source address
+starts at byte 12 of the header, the IPv6 one at byte 8. Every rule that
+carries an address therefore starts with `meta nfproto ipv4` or
+`meta nfproto ipv6` in the expressions the agent applies. When nft lists the
+table it leaves that match out wherever an `ip saddr` or `ip6 daddr` follows,
+since the address match already names the family, so `nft list table inet
+kuport` prints the nfproto match only on the accepting DNAT rules. The DNAT and
+SNAT statements name their family as well (`dnat ip6 to`, `snat ip6 to ip6
+saddr`), which tells the kernel the address in the register is 16 bytes.
+
+Under `Multi`, the conntrack save rule matches only the link a request arrives
+on and names no address. One save rule per link records the peer for requests
+of both families.
+
+Older releases wrote `table ip kuport`. The first pass of an agent that writes
+the inet table deletes the ip one in the same transaction, and shutdown deletes
+both.
+
+### IPv6 inside the IPv4 link
+
+The link's outer header stays IPv4, between the two nodes' InternalIP
+addresses, which the mesh accepts. VXLAN carries Ethernet frames, so an IPv6
+packet rides the same device as an IPv4 one, addressed to the far end of the
+/127. A 1350-byte underlay leaves the link 1300 bytes, above IPv6's minimum of
+1280.
+
+The kernel refuses an IPv6 address on a device smaller than 1280 bytes, and that
+refusal would fail the agent's whole apply, IPv4 included. A link sized below
+1280, which an underlay below 1330 produces, therefore carries IPv4 alone. Both
+ends read the same two MTU rows from the class status, so they agree on that
+as they agree on the size.
+
+The loop guard at pref 101 has no IPv6 twin. The vxlan driver copies the
+reply's mark onto the outer packet, and that outer packet is IPv4 whatever it
+carries, so the IPv4 guard is the one it meets.
+
+### Rendered rules for a dual-stack mapping
+
+The reconcile tests compute and render this fixture: node-a accepts on eth0,
+the pod sits on node-b at 10.244.5.5 and fd00:10:244:5::5, the mapping is TCP
+3000 under `Single`, and the pair holds slot 0. node-a sorts first, so it holds
+169.254.77.0/31 and fd64:f5ac:e961::/127, and node-b holds the .1 and ::1 ends.
+
+node-a, the accepting node:
+
+```
+table inet kuport {
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 10; policy accept;
+		meta nfproto ipv4 iifname "eth0" tcp dport 3000 counter dnat ip to 169.254.77.1:3000
+		meta nfproto ipv6 iifname "eth0" tcp dport 3000 counter dnat ip6 to [fd64:f5ac:e961::1]:3000
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname "kup-97459438" ip daddr 169.254.77.1 tcp dport 3000 counter snat ip to ip saddr
+		oifname "kup-97459438" ip6 daddr fd64:f5ac:e961::1 tcp dport 3000 counter snat ip6 to ip6 saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+	}
+}
+```
+
+node-b, the pod's node:
+
+```
+table inet kuport {
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 10; policy accept;
+		iifname "kup-8544dc0e" ip daddr 169.254.77.1 tcp dport 3000 counter dnat ip to 10.244.5.5:3000
+		iifname "kup-8544dc0e" ip6 daddr fd64:f5ac:e961::1 tcp dport 3000 counter dnat ip6 to [fd00:10:244:5::5]:3000
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname != "cilium_*" ip saddr 10.244.5.5 tcp sport 3000 counter snat ip to ip saddr
+		oifname != "cilium_*" ip6 saddr fd00:10:244:5::5 tcp sport 3000 counter snat ip6 to ip6 saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+		ip saddr 10.244.5.5 tcp sport 3000 counter meta mark set 0x6b700000
+		ip6 saddr fd00:10:244:5::5 tcp sport 3000 counter meta mark set 0x6b700000
+	}
+}
+```
+
+node-a's IPv6 DNAT sends the request to fd64:f5ac:e961::1, and node-b's IPv6
+link rule matches that same address before writing the pod's. Both of node-b's
+mark rules set 0x6b700000, slot 0's mark, and node-b's routing objects send
+either family back over kup-8544dc0e:
+
+| Object on node-b | Value |
+| --- | --- |
+| IPv4 rule, pref 101 | fwmark 0x6b700000 to 10.0.0.1/32 lookup main |
+| IPv4 rule, pref 102 | fwmark 0x6b700000 lookup 200 |
+| IPv6 rule, pref 102 | fwmark 0x6b700000 lookup 200 |
+| table 200, IPv4 | default via 169.254.77.0 dev kup-8544dc0e |
+| table 200, IPv6 | default via fd64:f5ac:e961:: dev kup-8544dc0e |
+
+The golden rulesets in `internal/datapath/testdata/` named `*-dual-stack` pin
+the same rule shapes, `Multi` included.
+
+### IPv6 forwarding on both nodes
+
+The accepting node forwards an IPv6 request into its link, and the pod's node
+forwards it from the link to the pod, so both need
+`net.ipv6.conf.all.forwarding` at 1. Cilium with IPv6 enabled sets it. The agent
+reads the sysctl on every pass. Where it is 0, or the file is missing because
+the kernel has no IPv6, the agent writes no IPv6 rule, address or route on that
+node and IPv4 is unaffected. The agent logs the change once, and when one of
+the node's class interfaces holds an IPv6 address, its class status row
+carries `ipv6Unavailable`. [Troubleshooting](troubleshooting.md#ipv6-does-not-answer)
+covers reading both.
 
 GRE would be lighter, 24 bytes against 50. Talos does not ship the module:
 `ip link add type gre` answers `Unknown device type`. A second WireGuard link

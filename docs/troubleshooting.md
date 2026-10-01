@@ -87,7 +87,7 @@ Every reason the code can write, and the first thing to check for each.
 | TunnelModeRequired | False | the agent read the CNI's configuration and it is not tunneling (for Cilium: `routing-mode` is not `tunnel`), so the inbound leg cannot preserve the client address | `kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.routing-mode}'` |
 | VxlanPortConflict | False | the class link port equals the CNI's VXLAN port (8472 on Cilium); the links would swallow the CNI's own traffic | change `returnPath.vxlan.port` |
 | SubnetExhausted | False | every /31 slot in `returnPath.vxlan.subnet` is claimed; a new pair cannot be allocated | widen the subnet (a /24 gives 128 slots); claims of pairs unused for 24h are dropped by the GC on their own |
-| InvalidSubnet | False | `returnPath.vxlan.subnet` does not parse as a CIDR | fix the field |
+| InvalidSubnet | False | `returnPath.vxlan.subnet` does not parse as a CIDR, or `subnet6` is not an IPv6 prefix holding a /127 for every /31 of `subnet`. The API refuses both, so this reason means a class written past that check; with only `subnet6` wrong, the links carry IPv4 alone | fix the field the message names |
 
 ## The counters
 
@@ -97,10 +97,14 @@ host's namespace (the agent is hostNetwork, so anything that can exec on the
 node works):
 
 ```sh
-nft list table ip kuport
+nft list table inet kuport
 ```
 
 You will see the three chains and, on each rule, `counter packets N bytes M`.
+A mapping delivered over IPv6 has an `ip6` rule beside each `ip` one, each
+with its own counter, so the table splits the path by family as well as by
+stage. A `table ip kuport` still present means the node runs an agent older
+than the inet table; the current agent deletes it on its first pass.
 What a climb means, and what a zero means, stage by stage:
 
 | Rule | Counter climbing | Counter stuck at zero |
@@ -142,6 +146,54 @@ ip rule list | grep 0x6b70
 You should see two lines per active link: pref 101 (to the peer's /32, lookup
 main) and pref 102 (lookup the per-slot table). One line per link is the
 loop.
+
+A link carrying IPv6 adds one IPv6 rule, the pref 102 divert with the same mark
+and table:
+
+```sh
+ip -6 rule list | grep 0x6b70
+```
+
+The IPv6 list has no pref 101 line. The outer packet is IPv4, so the IPv4 loop
+guard covers IPv6 replies too.
+
+## IPv6 does not answer
+
+The IPv4 address of a mapping answers and the IPv6 one does not. Read the
+mapping's status first:
+
+```sh
+kubectl get portmap -n <namespace> <name> -o yaml
+```
+
+| What you see | Meaning | First check |
+| --- | --- | --- |
+| no `endpoint.address6` | the serving node does not deliver this mapping over IPv6: the Service has no IPv6 EndpointSlice, its IPv6 slice does not list the chosen pod as ready, or the serving node does not forward IPv6 | `kubectl -n <ns> get endpointslice -l kubernetes.io/service-name=<svc>`, then the class row below |
+| `endpoint.address6` set, the row's `address6` empty | the interface holds no global IPv6 address on the serving node | `ip -6 addr show dev <iface>` on that node |
+| both set, IPv6 times out | the rules exist on the serving node; the pod's node may not forward IPv6, or the link may be too small for IPv6 | the agent log on the pod's node, then the link MTU |
+
+A node whose `net.ipv6.conf.all.forwarding` is 0 writes no IPv6 rule, address
+or route, and keeps delivering IPv4. Its class status row carries
+`ipv6Unavailable` when one of its class interfaces holds an IPv6 address:
+
+```sh
+kubectl get portmapclass <name> -o jsonpath='{.status.nodes}'
+```
+
+The pod's node is often in no class, so it has no row. Its agent logs the state
+once each time it changes:
+
+```sh
+kubectl -n kuport-system logs <agent pod on that node> | grep "IPv6 forwarding"
+```
+
+Expected result on a node that delivers IPv6: `IPv6 forwarding is on`. The line
+`IPv6 forwarding is off; this node delivers IPv4 alone` means the sysctl reads 0
+or is missing; Cilium with IPv6 enabled sets it to 1.
+
+A link whose MTU is below 1280 carries no IPv6, because the kernel refuses an
+IPv6 address on it. The [MTU](#mtu) section reads the link figures; an
+underlay below 1330 produces such a link.
 
 ## The host firewall
 

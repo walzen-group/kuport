@@ -7,7 +7,9 @@ Status: v0.4.0, 2026-09-08. Both serving modes carry traffic on the test
 cluster, verified across every entry point in UDP and TCP with the client's
 address intact on each reply, cross-node included. Every rule in
 [the datapath](datapath.md) carried real traffic by hand before it was written
-down, and each one names the measurement that confirmed it.
+down, and each one names the measurement that confirmed it. IPv6 delivery came
+after: the datapath tests load its rules into a kernel, and it has not yet
+carried traffic on a cluster.
 
 ## The problem
 
@@ -37,6 +39,8 @@ may send.
   the same port is reachable on a LAN address and an overlay address.
 - An internal port works the same as a public one; only the class differs.
 - The pod sees the client's real address on every path.
+- A dual-stack Service is delivered over IPv4 and IPv6, both to the same pod,
+  with the client's IPv6 address intact.
 - Two workloads asking for one port is reported rather than silently dropped.
 - An admin decides which nodes, interfaces and ports exist, and who may ask.
 
@@ -48,7 +52,11 @@ may send.
   side rather than the serving side: every accepting node programs the mapping,
   so a routed address survives one of them going away, and all of them forward
   to that same one endpoint. See [serving modes](datapath.md#serving-modes).
-- IPv6 in the first version. Every rule is `table ip`.
+- An IPv6 underlay. The return links run between the nodes' IPv4 addresses and
+  carry IPv6 inside, so a cluster whose nodes have no IPv4 address between them
+  cannot build one.
+- A Service with IPv6 endpoints alone. The pod is chosen from the IPv4
+  EndpointSlices, so such a mapping reports `NoReadyEndpoint`.
 - Admission webhooks. Conflicts are reported in status; the reasoning is under
   [decisions](decisions.md).
 - Replacing the CNI. kuport writes rules beside it.
@@ -60,6 +68,7 @@ may send.
 | the agent can write nftables and routes on the host | it runs as a DaemonSet with hostNetwork and NET_ADMIN |
 | nodes reach each other on an address the mesh accepts | both legs of a remote mapping ride a link whose outer header uses those addresses |
 | the CNI gives a pod an address on its own node | the last translation hands the packet to the pod through the CNI's own path there |
+| `net.ipv6.conf.all.forwarding` is 1, for IPv6 delivery only | the accepting node and the pod's node both forward the IPv6 request; a node without it delivers IPv4 alone |
 
 Two requirements were dropped in v0.4.0. Until then the inbound leg travelled
 the CNI's tunnel, which meant Cilium had to be in tunnel mode and pod addresses

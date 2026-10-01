@@ -39,6 +39,28 @@ quoted against it turned out to be nothing: both nodes already held an entry per
 flow, and measurement showed the pod's node holding an `[UNREPLIED]` record of
 the reply. The change makes that entry a proper established flow instead.
 
+## IPv6 inside the IPv4 link
+
+IPv6 delivery reuses each return link: the /127 sits on the same kup- device
+as the /31, and the outer header stays IPv4 between the nodes' InternalIP
+addresses. Decided 2026-10-01.
+
+A second set of links with an IPv6 underlay would need every node pair to
+reach each other over IPv6 through the mesh, and a second device, VNI and slot
+per pair. The IPv4 path between nodes already exists for every IPv4 mapping,
+and VXLAN carries Ethernet frames, so an IPv6 packet crosses it unchanged. The
+pair keeps one slot, one mark and one routing table number in both families.
+
+The rules live in one `table inet kuport`. Two tables, ip and ip6, would
+duplicate the chains and leave the agent writing two transactions per pass, and
+a failure between them would program one family and not the other. The inet
+table rewrites both families in the single transaction the ip table used.
+
+The Service's EndpointSlices decide the families, so the PortMap API gained no
+field. The pod is still chosen from the IPv4 slices, which keeps the choice
+every agent makes identical to the one it made before IPv6, and the IPv6 slice
+supplies only that pod's second address.
+
 ## Multi keeps one globally chosen endpoint
 
 A node-local endpoint choice was proposed, where each accepting node serves a pod

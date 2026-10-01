@@ -49,11 +49,12 @@ kuport owns exactly the objects it names:
 
 | Object | Named |
 | --- | --- |
-| nftables table | `kuport`, family ip |
+| nftables table | `kuport`, family inet; a family ip table of that name, which older releases wrote, is deleted |
 | nftables chains | `kup-pre`, `kup-post`, `kup-mangle` |
 | vxlan links | `kup-` + first 8 hex of sha256(class name and peer node name), 12 characters |
-| routing tables | `200 + slot`, the slot recorded in the class status |
-| routing rules | pref 101 loop guard, pref 102 divert, marks 0x6b700000 or'd with the slot |
+| link addresses | the /31 and, for IPv6 delivery, the /127 on a kup- link; any other global IPv6 address on it is removed, the kernel's link-local one is kept |
+| routing tables | `200 + slot`, the slot recorded in the class status, in IPv4 and IPv6 |
+| routing rules | pref 101 loop guard (IPv4 only), pref 102 divert (IPv4 and IPv6), marks 0x6b700000 or'd with the slot |
 | masquerade and mark rules | inside kuport's own chains, which are rewritten whole each pass |
 
 Every pass rewrites the whole table in one transaction. Links, rules and routes
@@ -62,8 +63,12 @@ finds under its own names and does not want is removed.
 
 A link device is corrected in place where the kernel allows it. Its endpoint
 addresses and its MTU can be changed on a running device; its VNI and destination
-port cannot, and those rebuild it. A rebuild drops the /31 and every route
-pointing at the old index, which the same pass restores.
+port cannot, and those rebuild it. A rebuild drops the /31, the /127 and every
+route pointing at the old index, which the same pass restores.
+
+A kernel booted without IPv6 answers an IPv6 rule or route listing with
+EAFNOSUPPORT. The agent skips the IPv6 half of the reconcile there whenever
+the plan holds no IPv6 object, so an IPv4-only node keeps working.
 
 On shutdown the agent removes its table, links, rules and routes, so a node taken
 out of a class stops holding state nobody wants. A crashed agent leaves them, and

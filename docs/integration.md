@@ -17,7 +17,8 @@ refuses to match, docs/troubleshooting.md is written for exactly that moment.
 
 ## Preconditions
 
-Check all four before installing anything. Each is load-bearing: kuport makes
+Check the first four before installing anything, and the fifth when a mapped
+Service is dual-stack. Each one matters: kuport makes
 a missing one visible as a condition on the class, and nothing more. It will
 not degrade around it and it cannot fix it.
 
@@ -104,6 +105,22 @@ negative is not: replies over the link silently disappear, and the symptom
 looks like packet loss, never like a kuport error. After install,
 `kubectl get portmapclass <name> -o jsonpath='{.status.nodes}'` shows each
 node's own underlay and link numbers.
+
+A link carries IPv6 only when its budget is at least 1280, the IPv6 minimum,
+which needs an underlay of 1330 or more.
+
+### Step 5: IPv6 forwarding, for dual-stack Services
+
+Skip this step when no Service behind a PortMap is dual-stack. Otherwise, on
+every accepting node and every node a mapped pod may run on:
+
+```sh
+cat /proc/sys/net/ipv6/conf/all/forwarding
+```
+
+Expected result: `1`. Cilium with IPv6 enabled sets it. A node reading `0`
+delivers its mappings over IPv4 only; the agent logs that, and the class
+status row of an accepting node says so in `ipv6Unavailable`.
 
 ## Installing
 
@@ -305,6 +322,7 @@ Which fields are decisions and which are defaults:
 | returnPath.vxlan.vni | default 4242 | anything that does not collide with other vxlan use on the mesh |
 | returnPath.vxlan.port | default 4790 | must differ from the CNI's 8472 |
 | returnPath.vxlan.subnet | default 169.254.77.0/24 | /31 per node pair, 128 slots; link-local space avoids route table surgery |
+| returnPath.vxlan.subnet6 | default fd64:f5ac:e961::/112 | /127 per node pair at the same slot, used only for IPv6 delivery; must hold as many /127s as subnet holds /31s |
 
 Labels the selectors match do not exist until you create them:
 
@@ -393,7 +411,9 @@ So you do not go looking for it:
 - HTTP routing or TLS. Use an ingress controller.
 - Load balancing one port across pods on several nodes. One endpoint is
   chosen per mapping, deterministically, and reprogrammed when it moves.
-- IPv6. Every rule is in the `ip` family.
+- An IPv6 underlay for the return links, or a Service with IPv6 endpoints
+  alone. A dual-stack Service is delivered over both families, with IPv6
+  riding inside the IPv4 link; docs/datapath.md has the rules.
 - Admission webhooks. Conflicts are reported in status, never blocked at
   apply time.
 - Anything in the `filter` table. The host firewall is yours.

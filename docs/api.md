@@ -36,6 +36,7 @@ spec:
       vni: 4242
       port: 4790
       subnet: 169.254.77.0/24
+      subnet6: fd64:f5ac:e961::/112
 ```
 
 | Field | Type | Meaning |
@@ -50,11 +51,13 @@ spec:
 | returnPath.vxlan.vni | int | Base VXLAN network identifier for the links this class builds. Each slot takes the base plus its own number, because the kernel keys a device by VNI and port. |
 | returnPath.vxlan.port | int | UDP port for the links. Must differ from the CNI's, which is 8472 for Cilium. Default 4790. |
 | returnPath.vxlan.subnet | CIDR | Link addresses are allocated from here, a /31 per node pair (RFC 3021 point-to-point), so the default gives 128 slots. The slot for a pair is a recorded claim in status.links rather than a computed hash. Default 169.254.77.0/24. |
+| returnPath.vxlan.subnet6 | IPv6 CIDR | IPv6 link addresses are allocated from here, a /127 per node pair (RFC 6164) at the pair's slot in `subnet`. The API refuses a prefix that is not IPv6, and one holding fewer /127s than `subnet` holds /31s. Default fd64:f5ac:e961::/112, a ULA prefix whose 40 random bits follow RFC 4193. |
 
 Two classes whose accepting nodes overlap need their own `vni` and `subnet`. A
 class numbers its slots from zero, so two classes sharing a node would both ask
 for the base VNI and the first /31 there, and the kernel refuses the second of
-each.
+each. When both classes deliver IPv6, give them their own `subnet6` too, or the
+first /127 collides the same way.
 
 ## PortMap
 
@@ -109,8 +112,8 @@ spec:
 The accepting node's ruleset then carries:
 
 ```
-iifname "enp1s0" tcp dport 10002 counter dnat to 10.244.17.52:8096
-oifname "cilium_host" ip daddr 10.244.17.52 tcp dport 8096 counter snat to ip saddr
+meta nfproto ipv4 iifname "enp1s0" tcp dport 10002 counter dnat ip to 10.244.17.52:8096
+oifname "cilium_host" ip daddr 10.244.17.52 tcp dport 8096 counter snat ip to ip saddr
 ```
 
 When the pod sits on another node, the request crosses the return link on the
@@ -129,6 +132,28 @@ translation existed. Two cases are refused with Accepted=False:
 The immutable fields are immutable because changing them is indistinguishable
 from deleting one mapping and creating another, and the reconcile is simpler if
 it never has to unwind a half-changed mapping.
+
+### IPv6
+
+The Service decides which families a mapping is delivered in; the PortMap has
+no field for it. The agent chooses the pod from the Service's IPv4
+EndpointSlices, then looks the same pod up in its IPv6 EndpointSlice, matching
+the endpoint's targetRef.
+
+| Service `ipFamilyPolicy` | EndpointSlices | Delivered over |
+| --- | --- | --- |
+| SingleStack, IPv4 | IPv4 | IPv4, with the rules every earlier release wrote |
+| PreferDualStack or RequireDualStack, on a dual-stack cluster | IPv4 and IPv6 | IPv4 and IPv6, both to the same pod |
+| SingleStack, IPv6 | IPv6 | nothing: the mapping reports `Programmed=False` with `NoReadyEndpoint` |
+
+An IPv6 endpoint counts only when it is the chosen pod and ready. Port
+translation applies to both families in the same way. A node delivers IPv6 only
+while its host forwards IPv6; [datapath.md](datapath.md#ipv6) has the rules each
+node writes and that requirement.
+
+An interface that holds no IPv6 address still gets the IPv6 DNAT rule, because
+the rule matches the interface and the port. No IPv6 packet arrives there, and
+its published row carries no `address6`.
 
 ## Choosing interfaces
 
@@ -167,10 +192,12 @@ status:
   endpoint:
     node: worker-b
     address: 10.244.18.107
+    address6: fd00:10:244:12::6b
   published:
     - node: edge-a
       interface: enp1s0
       address: 203.0.113.9
+      address6: 2001:db8::9
     - node: edge-a
       interface: wt0
       address: 100.64.93.143
@@ -192,6 +219,12 @@ The serving node writes the mapping's status, and every published row names one
 of its own interfaces, so it resolves each address off its own host. A row whose
 interface has not resolved yet carries an empty address and fills in on the next
 pass.
+
+`endpoint.address6` is the pod's IPv6 address when the serving node delivers the
+mapping over IPv6. Only then does each row carry `address6`, the interface's
+first global IPv6 address, which `kubectl get portmap -o wide` prints in the
+PUBLISHED6 column. In the example the wt0 row has none, because wt0 holds no
+IPv6 address on edge-a.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
@@ -227,6 +260,8 @@ status:
       addresses:
         enp1s0: 203.0.113.9
         wt0: 100.64.93.143
+      addresses6:
+        enp1s0: 2001:db8::9
     - name: worker-c
       ready: false
       message: interface wt0 not present
@@ -251,6 +286,12 @@ class names each node's interfaces, so an interface that fails to resolve is a
 mistake in the class rather than a node that lacks the NIC, and the row says so
 rather than skipping it.
 
+`addresses6` holds the first global IPv6 address of each of those interfaces
+that has one, while the node forwards IPv6. On a node whose
+`net.ipv6.conf.all.forwarding` is 0, `addresses6` stays empty, and if one of the
+interfaces holds an IPv6 address, the row carries `ipv6Unavailable` with the
+reason. Neither field changes `ready`: IPv4 works either way.
+
 `linkMTU` is that node's own figure, `underlayMTU` less the encapsulation. A
 link device takes the smaller of its two ends' figures, so a link to a peer on a
 thinner underlay carries less than either row suggests. [MTU in
@@ -258,7 +299,7 @@ troubleshooting.md](troubleshooting.md#mtu) has the reading.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
-| Ready | the subnet parses, has a free slot, and the link port does not collide with the CNI's | `VxlanPortConflict`, `SubnetExhausted`, `InvalidSubnet` |
+| Ready | the subnet parses, has a free slot, subnet6 is a usable IPv6 prefix, and the link port does not collide with the CNI's | `VxlanPortConflict`, `SubnetExhausted`, `InvalidSubnet` |
 
 `TunnelModeRequired` was a fourth reason until v0.4.0, when both legs moved onto
 kuport's own return link and the CNI's routing mode stopped deciding anything.

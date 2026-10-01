@@ -52,6 +52,9 @@ Resolution:
    input describes where the agent runs, so every agent picks the same endpoint.
 3. Fix the serving node: the chosen endpoint's node when that node accepts the
    class, otherwise the first accepting node by name.
+4. Look the chosen pod up in the Service's IPv6 EndpointSlice by its targetRef.
+   When the pod is there and ready, and this node forwards IPv6, every rule
+   below that carries an address is emitted once more in IPv6.
 
 Under `Single` exactly one node serves each mapping. Under `Multi` every
 accepting node programs it and the serving node keeps its separate job of
