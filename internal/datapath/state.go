@@ -14,6 +14,11 @@ type State struct {
 	Links  []Link
 	Rules  []IPRule
 	Routes []Route
+
+	// LocalAddrs are the node's own addresses, the destinations a host
+	// firewall protects. A mapped packet addressed to one of them is steered
+	// past that firewall; steer.go says how.
+	LocalAddrs []netip.Addr
 }
 
 // PortSel is a protocol and an inclusive port range. Last == First for a single

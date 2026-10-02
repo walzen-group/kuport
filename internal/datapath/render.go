@@ -9,11 +9,29 @@ import (
 // bare words mark and fwd as chain names; keeping every name prefixed stays
 // clear of the grammar entirely.
 const (
-	TableName   = "kuport"
-	ChainPre    = "kup-pre"
-	ChainPost   = "kup-post"
-	ChainMangle = "kup-mangle"
+	TableName    = "kuport"
+	ChainRaw     = "kup-raw"
+	ChainPre     = "kup-pre"
+	ChainPost    = "kup-post"
+	ChainMangle  = "kup-mangle"
+	ChainRestore = "kup-restore"
 )
+
+// steerMap and restoreMap name the maps kup-raw and kup-restore look a
+// family's addresses up in: a local address to its stand-in, and back.
+func steerMap(f Family) string {
+	if f == FamilyIPv6 {
+		return "kup-steer6"
+	}
+	return "kup-steer4"
+}
+
+func restoreMap(f Family) string {
+	if f == FamilyIPv6 {
+		return "kup-restore6"
+	}
+	return "kup-restore4"
+}
 
 // ownedMarkMask and ownedMarkValue identify the marks kuport sets. Every rule
 // kuport owns carries a 0x6b70**** fwmark ("kp" in the high half), which is how
@@ -43,6 +61,14 @@ const (
 	// its request arrived on. Under Multi serving it replaces KindMark, which
 	// carries one peer's mark and so cannot tell several accepting nodes apart.
 	KindCtLoad
+	// KindSteer rewrites a mapped request's destination from a local address
+	// to its stand-in, through the family's steer map, before conntrack sees
+	// the packet. A destination missing from the map is left alone.
+	KindSteer
+	// KindRestore rewrites a reply's source from a stand-in back to the local
+	// address, through the family's restore map, after conntrack has undone
+	// the DNAT.
+	KindRestore
 )
 
 // Rule is one nftables rule described by semantic fields rather than by
@@ -63,6 +89,7 @@ type Rule struct {
 	ToAddr    netip.Addr  // KindDNAT target address
 	ToPort    uint16      // KindDNAT target port; 0 keeps the matched port
 	Mark      uint32      // KindMark value
+	MapFamily Family      // KindSteer and KindRestore: whose maps to look up
 }
 
 // family is the address family a rule is written for. ok is false for a rule
@@ -70,6 +97,8 @@ type Rule struct {
 // alone and so covers a request of either family.
 func (r Rule) family() (f Family, ok bool) {
 	switch {
+	case r.Kind == KindSteer || r.Kind == KindRestore:
+		return r.MapFamily, true
 	case r.SrcAddr != nil:
 		return familyOf(*r.SrcAddr), true
 	case r.DstAddr != nil:
@@ -91,7 +120,8 @@ func familyOf(a netip.Addr) Family {
 // for the three kuport chains and the netlink objects. It is produced purely
 // from a State and never touches the host itself.
 type Plan struct {
-	Rules   []Rule // ordered across the three chains
+	Rules   []Rule  // ordered across the five chains
+	Steer   []Steer // the steer and restore maps' entries, for steered families
 	Links   []Link
 	IPRules []IPRule
 	Routes  []Route
@@ -103,14 +133,19 @@ type chainDef struct {
 	header string
 }
 
-// chains are rendered in this fixed order.
+// chains are rendered in this fixed order. kup-raw and kup-restore are filter
+// chains because a filter chain runs at the priority it declares, which a nat
+// chain does not: the kernel calls every nat chain from the one hook it
+// registers at the dstnat or srcnat priority.
 var chains = []chainDef{
+	{ChainRaw, "type filter hook prerouting priority raw - 10; policy accept;"},
 	{ChainPre, "type nat hook prerouting priority dstnat - 20; policy accept;"},
 	{ChainPost, "type nat hook postrouting priority srcnat - 10; policy accept;"},
 	{ChainMangle, "type filter hook prerouting priority mangle + 10; policy accept;"},
+	{ChainRestore, "type filter hook postrouting priority srcnat + 10; policy accept;"},
 }
 
-var chainOrder = map[string]int{ChainPre: 0, ChainPost: 1, ChainMangle: 2}
+var chainOrder = map[string]int{ChainRaw: 0, ChainPre: 1, ChainPost: 2, ChainMangle: 3, ChainRestore: 4}
 
 // Render turns a desired State into an ordered Plan. It is deterministic: two
 // calls on the same State, whatever the map iteration order upstream, produce a
@@ -118,16 +153,62 @@ var chainOrder = map[string]int{ChainPre: 0, ChainPost: 1, ChainMangle: 2}
 func Render(s State) Plan {
 	var rules []Rule
 
+	pairs := steerPairs(s)
+	stand := map[netip.Addr]netip.Addr{}
+	hasPairs := map[Family]bool{}
+	for _, p := range pairs {
+		stand[p.Local] = p.Virtual
+		hasPairs[familyOf(p.Local)] = true
+	}
+
+	// Each DNAT rule gets a steer rule on the same interface and port. A rule
+	// pinned to a local address, a return link's end, is pinned to that
+	// address's stand-in instead, since kup-raw has rewritten it by the time
+	// kup-pre runs.
+	steered := map[Family]bool{}
+	steerSeen := map[string]bool{}
 	for _, d := range s.DNAT {
+		dst := d.DstAddr
+		if dst != nil {
+			if v, ok := stand[dst.Unmap()]; ok {
+				dst = &v
+			}
+		}
 		rules = append(rules, Rule{
 			Chain:   ChainPre,
 			Kind:    KindDNAT,
 			IifName: d.Iface,
-			DstAddr: d.DstAddr,
+			DstAddr: dst,
 			Port:    d.Port,
 			ToAddr:  d.ToAddr,
 			ToPort:  d.ToPort,
 		})
+
+		fam := familyOf(d.ToAddr)
+		key := d.Iface + "|" + selText(d.Port) + "|" + nfprotoText(fam)
+		if !hasPairs[fam] || steerSeen[key] {
+			continue
+		}
+		steerSeen[key] = true
+		steered[fam] = true
+		rules = append(rules, Rule{
+			Chain:     ChainRaw,
+			Kind:      KindSteer,
+			IifName:   d.Iface,
+			Port:      d.Port,
+			MapFamily: fam,
+		})
+	}
+	var steer []Steer
+	for _, p := range pairs {
+		if steered[familyOf(p.Local)] {
+			steer = append(steer, p)
+		}
+	}
+	for _, f := range []Family{FamilyIPv4, FamilyIPv6} {
+		if steered[f] {
+			rules = append(rules, Rule{Chain: ChainRestore, Kind: KindRestore, MapFamily: f})
+		}
 	}
 	for _, e := range s.Exempt {
 		rules = append(rules, Rule{
@@ -208,7 +289,12 @@ func Render(s State) Plan {
 		return a.Via.String() < b.Via.String()
 	})
 
-	return Plan{Rules: rules, Links: links, IPRules: iprules, Routes: routes}
+	return Plan{Rules: rules, Steer: steer, Links: links, IPRules: iprules, Routes: routes}
+}
+
+// selText is a port selection as a sort and dedupe key.
+func selText(p PortSel) string {
+	return p.Proto + "/" + portText(p)
 }
 
 // sortRules orders rules by chain, then within a chain by

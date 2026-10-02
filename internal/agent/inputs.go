@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"net/netip"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -50,7 +51,20 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	}
 	in.InterfaceAddrs, in.InterfaceAddrs6 = r.resolveInterfaces(in.Classes)
 	in.IPv6Forwarding = r.ipv6Forwarding()
+	in.LocalAddrs = r.localAddrs()
 	return in, nil
+}
+
+// localAddrs reads the addresses the node holds. A failed read steers nothing
+// this pass: a mapping still answers on a node without a host firewall, and
+// the error is logged for the node that has one.
+func (r *Reconciler) localAddrs() []netip.Addr {
+	addrs, err := r.Host.LocalAddrs()
+	if err != nil {
+		r.Log.Error(err, "cannot read the node's addresses; mapped packets are not steered past a host firewall this pass")
+		return nil
+	}
+	return addrs
 }
 
 // ipv6Forwarding reads whether the host forwards IPv6. An unreadable sysctl

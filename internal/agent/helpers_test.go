@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -70,6 +71,9 @@ type fakeHost struct {
 	ifaceAddr6  map[string]string
 	ipv6Fwd     bool
 	ipv6FwdErr  error
+
+	localAddrs    []netip.Addr
+	localAddrsErr error
 }
 
 func (h *fakeHost) InterfaceAddr6(name string) (string, error) {
@@ -80,6 +84,8 @@ func (h *fakeHost) InterfaceAddr6(name string) (string, error) {
 }
 
 func (h *fakeHost) IPv6Forwarding() (bool, error) { return h.ipv6Fwd, h.ipv6FwdErr }
+
+func (h *fakeHost) LocalAddrs() ([]netip.Addr, error) { return h.localAddrs, h.localAddrsErr }
 
 func (h *fakeHost) TunnelMode(context.Context) (bool, bool, error) {
 	return h.tunnelOK, h.tunnelKnown, h.tunnelErr

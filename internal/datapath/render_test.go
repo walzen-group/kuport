@@ -290,7 +290,7 @@ func TestNFTExprsNonEmpty(t *testing.T) {
 	for _, c := range cases() {
 		p := Render(c.state)
 		for i, r := range p.Rules {
-			exprs := nftExprs(r)
+			exprs := nftExprs(r, nil)
 			if len(exprs) == 0 {
 				t.Errorf("%s: rule %d (%s) produced no expressions", c.name, i, nftText(r))
 			}

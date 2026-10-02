@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
@@ -70,6 +71,10 @@ type Host interface {
 	// IPv6Forwarding reports net.ipv6.conf.all.forwarding. A node that does
 	// not forward IPv6 cannot hand an IPv6 request to a pod.
 	IPv6Forwarding() (bool, error)
+	// LocalAddrs lists the addresses the node holds on any interface,
+	// loopback and link-local left out. A mapped packet addressed to one of
+	// them is steered past a host firewall.
+	LocalAddrs() ([]netip.Addr, error)
 }
 
 // Reconciler is the whole-node reconcile loop. Everything host-facing is behind

@@ -1,6 +1,7 @@
 package datapath
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 
@@ -32,11 +33,20 @@ func delTable(conn NFTConn, t *nftables.Table) {
 	conn.DelTable(t)
 }
 
-// nftChains returns the three base chains in fixed order, hooked and prioritised
-// exactly as the golden headers describe: dstnat-20, srcnat-10, mangle+10.
+// nftChains returns the five base chains in fixed order, hooked and prioritised
+// exactly as the golden headers describe: raw-10, dstnat-20, srcnat-10,
+// mangle+10, srcnat+10.
 func nftChains(t *nftables.Table) []*nftables.Chain {
 	accept := nftables.ChainPolicyAccept
 	return []*nftables.Chain{
+		{
+			Name:     ChainRaw,
+			Table:    t,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookPrerouting,
+			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityRaw - 10),
+			Policy:   &accept,
+		},
 		{
 			Name:     ChainPre,
 			Table:    t,
@@ -61,13 +71,56 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityMangle + 10),
 			Policy:   &accept,
 		},
+		{
+			Name:     ChainRestore,
+			Table:    t,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookPostrouting,
+			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATSource + 10),
+			Policy:   &accept,
+		},
 	}
+}
+
+// nftMaps returns the steer and restore maps of each family the plan steers,
+// with their elements: local address to stand-in, and stand-in to local
+// address.
+func nftMaps(t *nftables.Table, steer []Steer) []nftMap {
+	var out []nftMap
+	for _, f := range []Family{FamilyIPv4, FamilyIPv6} {
+		var fwd, back []nftables.SetElement
+		for _, p := range steer {
+			if familyOf(p.Local) != f {
+				continue
+			}
+			fwd = append(fwd, nftables.SetElement{Key: addrBytes(p.Local), Val: addrBytes(p.Virtual)})
+			back = append(back, nftables.SetElement{Key: addrBytes(p.Virtual), Val: addrBytes(p.Local)})
+		}
+		if len(fwd) == 0 {
+			continue
+		}
+		typ := nftables.TypeIPAddr
+		if f == FamilyIPv6 {
+			typ = nftables.TypeIP6Addr
+		}
+		out = append(out,
+			nftMap{set: &nftables.Set{Table: t, Name: steerMap(f), IsMap: true, KeyType: typ, DataType: typ}, elems: fwd},
+			nftMap{set: &nftables.Set{Table: t, Name: restoreMap(f), IsMap: true, KeyType: typ, DataType: typ}, elems: back},
+		)
+	}
+	return out
+}
+
+type nftMap struct {
+	set   *nftables.Set
+	elems []nftables.SetElement
 }
 
 // nftExprs builds the netlink expressions that actually get applied for a Rule.
 // It is the applied sibling of nftText; both are driven from the same Rule so
-// they cannot describe different rules.
-func nftExprs(r Rule) []expr.Any {
+// they cannot describe different rules. sets resolves a map's name to the set
+// added in the same transaction, whose ID a lookup carries.
+func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 	var e []expr.Any
 
 	// An inet table hands every rule packets of both families, and a payload
@@ -112,6 +165,17 @@ func nftExprs(r Rule) []expr.Any {
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{protoNum(r.Port.Proto)}},
 		)
 		e = append(e, portMatch(r.Port, r.PortIsSrc)...)
+	}
+
+	// The rewrite comes before the counter, so a lookup that misses ends the
+	// rule uncounted and the counter shows packets actually rewritten.
+	switch r.Kind {
+	case KindSteer:
+		e = append(e, rewriteExprs(fam, false, lookupSet(sets, steerMap(fam)))...)
+		return append(e, &expr.Counter{})
+	case KindRestore:
+		e = append(e, rewriteExprs(fam, true, lookupSet(sets, restoreMap(fam)))...)
+		return append(e, &expr.Counter{})
 	}
 
 	e = append(e, &expr.Counter{})
@@ -288,6 +352,61 @@ func snatIdentityExprs(f Family) []expr.Any {
 	}
 }
 
+// lookupSet returns the named set from the transaction, or a set carrying the
+// name alone, which a lookup resolves against the kernel's table.
+func lookupSet(sets map[string]*nftables.Set, name string) *nftables.Set {
+	if s, ok := sets[name]; ok {
+		return s
+	}
+	return &nftables.Set{Name: name}
+}
+
+// rewriteExprs replaces the destination (or, with src, the source) address
+// with what the map holds for it. A lookup that misses breaks the rule and
+// leaves the packet as it was.
+//
+// IPv4 needs its header checksum fixed, and the TCP or UDP checksum through
+// the pseudo-header flag; the kernel skips a UDP checksum of zero. IPv6 has no
+// header checksum, and steerV6 picks a stand-in with the same ones' complement
+// sum as the address it replaces, so the transport checksum stays correct with
+// no update. That also keeps clear of google/nftables, which sends the
+// pseudo-header flag only together with a checksum type.
+func rewriteExprs(f Family, src bool, set *nftables.Set) []expr.Any {
+	offset, length := addrLoad(f, src)
+	write := &expr.Payload{
+		OperationType:  expr.PayloadWrite,
+		SourceRegister: 1,
+		Base:           expr.PayloadBaseNetworkHeader,
+		Offset:         offset,
+		Len:            length,
+	}
+	if f == FamilyIPv4 {
+		write.CsumType = expr.CsumTypeInet
+		write.CsumOffset = ipv4CsumOffset
+		write.CsumFlags = unix.NFT_PAYLOAD_L4CSUM_PSEUDOHDR
+	}
+	return []expr.Any{
+		&expr.Payload{
+			OperationType: expr.PayloadLoad,
+			DestRegister:  1,
+			Base:          expr.PayloadBaseNetworkHeader,
+			Offset:        offset,
+			Len:           length,
+		},
+		&expr.Lookup{
+			SourceRegister: 1,
+			DestRegister:   1,
+			IsDestRegSet:   true,
+			SetName:        set.Name,
+			SetID:          set.ID,
+		},
+		write,
+	}
+}
+
+// ipv4CsumOffset is where the IPv4 header keeps its checksum.
+const ipv4CsumOffset = 10
+
 // markExprs sets the fwmark that steers a reply back to the accepting node.
 func markExprs(mark uint32) []expr.Any {
 	return []expr.Any{
@@ -317,17 +436,25 @@ func ctLoadExprs() []expr.Any {
 }
 
 // applyNFT writes the whole kuport table in one transaction: remove a leftover
-// ip table, delete and re-add the inet table, add the chains and rules, then
-// flush the connection. Rewriting the entire table each pass is what makes a
-// deleted mapping disappear by absence. The table is deleted rather than
-// flushed because the kernel refuses to change a live base chain's hook or
-// priority, which is what moving kup-pre from dstnat - 10 to dstnat - 20 did.
+// ip table, delete and re-add the inet table, add the maps, chains and rules,
+// then flush the connection. Rewriting the entire table each pass is what makes
+// a deleted mapping disappear by absence. The table is deleted rather than
+// flushed because the kernel refuses to change a live base chain's hook,
+// priority or type, so an upgrade that reshapes a chain needs it.
 func applyNFT(conn NFTConn, plan Plan) error {
 	delTable(conn, legacyTable())
 
 	t := nftTable()
 	delTable(conn, t)
 	conn.AddTable(t)
+
+	sets := map[string]*nftables.Set{}
+	for _, m := range nftMaps(t, plan.Steer) {
+		if err := conn.AddSet(m.set, m.elems); err != nil {
+			return fmt.Errorf("add map %s: %w", m.set.Name, err)
+		}
+		sets[m.set.Name] = m.set
+	}
 
 	chainObjs := map[string]*nftables.Chain{}
 	for _, c := range nftChains(t) {
@@ -338,7 +465,7 @@ func applyNFT(conn NFTConn, plan Plan) error {
 		conn.AddRule(&nftables.Rule{
 			Table: t,
 			Chain: chainObjs[r.Chain],
-			Exprs: nftExprs(r),
+			Exprs: nftExprs(r, sets),
 		})
 	}
 	return conn.Flush()

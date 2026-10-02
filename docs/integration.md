@@ -398,9 +398,9 @@ are complete from the start; only the address can lag a pass.
 
 Step 5 is the only one that proves the datapath. Steps 1-4 describe what the
 agents wrote and reported; they can all be green while the port stays shut,
-most often because of a host firewall in `filter`, which kuport neither writes
-nor inspects. If 1-4 pass and 5 times out: docs/troubleshooting.md, the host
-firewall section and the counters section, in that order.
+most often because of a host firewall that drops forwarded traffic, which
+kuport does not inspect. If 1-4 pass and 5 times out: docs/troubleshooting.md,
+the host firewall section and the counters section, in that order.
 
 ## What kuport will not do
 
@@ -414,7 +414,10 @@ So you do not go looking for it:
   riding inside the IPv4 link; docs/datapath.md has the rules.
 - Admission webhooks. Conflicts are reported in status, never blocked at
   apply time.
-- Anything in the `filter` table. The host firewall is yours.
+- Rules in the host firewall. kuport's filter chains rewrite addresses and
+  return no verdict, so a firewall that drops forwarded traffic is yours to
+  open; one that drops new connections to the node's own addresses needs
+  nothing (docs/datapath.md, Host firewall).
 - Serving one mapping from several nodes at once. Exactly one accepting node
   serves each mapping, chosen from the shared inputs, so the port answers on
   one node's addresses; the other accepting nodes hold no rules for it.

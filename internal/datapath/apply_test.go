@@ -41,8 +41,9 @@ func (f *fakeNFT) AddTable(t *nftables.Table) *nftables.Table {
 	f.tableOps = append(f.tableOps, tableOp("add", t))
 	return t
 }
-func (f *fakeNFT) AddChain(c *nftables.Chain) *nftables.Chain { return c }
-func (f *fakeNFT) AddRule(r *nftables.Rule) *nftables.Rule    { f.staged++; return r }
+func (f *fakeNFT) AddChain(c *nftables.Chain) *nftables.Chain        { return c }
+func (f *fakeNFT) AddRule(r *nftables.Rule) *nftables.Rule           { f.staged++; return r }
+func (f *fakeNFT) AddSet(*nftables.Set, []nftables.SetElement) error { return nil }
 func (f *fakeNFT) DelTable(t *nftables.Table) {
 	f.tableDels++
 	f.tableOps = append(f.tableOps, tableOp("del", t))

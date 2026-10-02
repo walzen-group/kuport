@@ -1,4 +1,7 @@
 table inet kuport {
+	chain kup-raw {
+		type filter hook prerouting priority raw - 10; policy accept;
+	}
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 20; policy accept;
 		meta nfproto ipv4 iifname "enp1s0" udp dport 27015-27115 counter dnat ip to 10.244.18.107:27015-27115
@@ -10,5 +13,8 @@ table inet kuport {
 	}
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
+	}
+	chain kup-restore {
+		type filter hook postrouting priority srcnat + 10; policy accept;
 	}
 }

@@ -21,6 +21,7 @@ type NFTConn interface {
 	AddTable(t *nftables.Table) *nftables.Table
 	AddChain(c *nftables.Chain) *nftables.Chain
 	AddRule(r *nftables.Rule) *nftables.Rule
+	AddSet(s *nftables.Set, vals []nftables.SetElement) error
 	DelTable(t *nftables.Table)
 	Flush() error
 }

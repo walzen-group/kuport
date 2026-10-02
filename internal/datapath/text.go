@@ -2,8 +2,11 @@ package datapath
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/google/nftables"
 )
 
 // String renders the Plan's nftables ruleset as text, byte-for-byte what the
@@ -13,6 +16,20 @@ import (
 func (p Plan) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "table inet %s {\n", TableName)
+	for _, m := range nftMaps(nftTable(), p.Steer) {
+		typ := "ipv4_addr"
+		if m.set.KeyType == nftables.TypeIP6Addr {
+			typ = "ipv6_addr"
+		}
+		fmt.Fprintf(&b, "\tmap %s {\n", m.set.Name)
+		fmt.Fprintf(&b, "\t\ttype %s : %s\n", typ, typ)
+		var elems []string
+		for _, e := range m.elems {
+			elems = append(elems, addrText(e.Key)+" : "+addrText(e.Val))
+		}
+		fmt.Fprintf(&b, "\t\telements = { %s }\n", strings.Join(elems, ", "))
+		b.WriteString("\t}\n")
+	}
 	for _, c := range chains {
 		fmt.Fprintf(&b, "\tchain %s {\n", c.name)
 		fmt.Fprintf(&b, "\t\t%s\n", c.header)
@@ -90,8 +107,18 @@ func nftText(r Rule) string {
 		fmt.Fprintf(&b, "counter ct mark set 0x%x", r.Mark)
 	case KindCtLoad:
 		b.WriteString("counter meta mark set ct mark")
+	case KindSteer:
+		fmt.Fprintf(&b, "%s daddr set %s daddr map @%s counter", l3Text(fam), l3Text(fam), steerMap(fam))
+	case KindRestore:
+		fmt.Fprintf(&b, "%s saddr set %s saddr map @%s counter", l3Text(fam), l3Text(fam), restoreMap(fam))
 	}
 	return b.String()
+}
+
+// addrText renders an address held as 4 or 16 network-order bytes.
+func addrText(b []byte) string {
+	a, _ := netip.AddrFromSlice(b)
+	return a.String()
 }
 
 // l3Text is the keyword nft uses for a family's header and NAT statement.

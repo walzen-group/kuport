@@ -92,15 +92,18 @@ Every reason the code can write, and the first thing to check for each.
 ## The counters
 
 Every rule kuport writes carries a `counter`, so the datapath answers the
-question "did the packet get here" without logs. Run it on the node, in the
-host's namespace (the agent is hostNetwork, so anything that can exec on the
-node works):
+question "did the packet get here" without logs. Run `nft list table inet
+kuport` in the node's network namespace. The agent image has no `nft`, so use a
+node debug pod:
 
 ```sh
-nft list table inet kuport
+kubectl debug node/<node> -n kube-system --profile=sysadmin --image=alpine:3.24.2 --attach -- sh -c 'apk add -q nftables && nft list table inet kuport'
 ```
 
-You will see the three chains and, on each rule, `counter packets N bytes M`.
+`kubectl debug` leaves the pod `node-debugger-<node>-<suffix>` in kube-system;
+delete it afterwards.
+
+You will see the maps, the five chains and, on each rule, `counter packets N bytes M`.
 A mapping delivered over IPv6 has an `ip6` rule beside each `ip` one, each
 with its own counter, so the table splits the path by family as well as by
 stage. A `table ip kuport` still present means the node runs an agent older
@@ -109,7 +112,9 @@ What a climb means, and what a zero means, stage by stage:
 
 | Rule | Counter climbing | Counter stuck at zero |
 | --- | --- | --- |
-| `kup-pre` DNAT (serving node) | traffic arrives at that interface and port | nothing reaches the node on that tuple: wrong address dialed, the host firewall (see below), or upstream routing. Compare `published` against where the client actually sends |
+| `kup-raw` steer (serving node) | packets addressed to one of the node's own addresses arrive at that interface and port and are steered to its stand-in | nothing addressed to a node address arrives on that tuple: wrong address dialed or upstream routing, or the client dials an address the node does not hold, which reaches kup-pre unsteered |
+| `kup-pre` DNAT (serving node) | the packet reached the translation | with `kup-raw` climbing, something between them drops it: trace it, see the host firewall below. With both at zero, nothing reaches the node on that tuple. Compare `published` against where the client actually sends |
+| `kup-restore` (serving node) | replies are rewritten back to the address the client dialed | with `kup-pre` climbing, no reply came back through conntrack: look at the pod, or at the target node for a remote pod |
 | `kup-post` with `oifname "cilium_host"` (same-node pod) | the inbound leg is being claimed before Cilium's masquerade; the pod should see the client address | with the DNAT counter climbing, the pod is on another node; look at the target node instead |
 | `kup-mangle` mark rule (target node) | replies from the pod are marked and policy-routed back to the serving node | the pod's replies do not match src and sport: it replies from another address or port, or it never received the request |
 | `kup-post` with `oifname != "cilium_*"` (target node) | the reply leaves through the return link toward the serving node | replies are taking some other route: check the ip rule ladder and the link, next sections |
@@ -197,23 +202,32 @@ underlay below 1330 produces such a link.
 
 ## The host firewall
 
-kuport writes `nat` and `mangle` chains in its own table. It writes nothing in
-`filter`, and it does not look for a foreign filter chain either. That is a
-decision, recorded in [decisions.md](decisions.md#host-firewall): a
-workload-authored PortMap must not be able to punch a hole in the host firewall.
+kuport steers a mapped packet past a firewall that drops new connections to the
+node's own addresses, Talos's ingress firewall among them, so such a firewall
+needs no rule for a mapped port. [datapath.md](datapath.md#host-firewall) shows
+how, and [decisions.md](decisions.md#host-firewall) why.
 
-The consequence is the most likely first-install surprise: a node running
-firewalld, ufw, or any policy that drops forwarded or input traffic will drop
-the client's packet before kuport's rules matter, and kuport will report the
-mapping fully healthy. `Accepted=True`, `Programmed=True`, `published`
-populated, DNAT counters at zero. Nothing contradicts anything, because status
-describes the rules kuport owns, not the machine's other rules.
+A firewall that drops forwarded traffic still drops a mapping's packet: ufw's
+default forward policy, a firewalld zone without forwarding, or any forward
+chain with a drop policy. kuport then reports the mapping fully healthy,
+`Accepted=True`, `Programmed=True` and `published` populated, because status
+describes the rules kuport owns and not the rest of the machine's. The
+`kup-raw` and `kup-pre` counters climb while the pod never sees the request.
+Allow forwarding to the pod network with whatever manages that firewall. Nothing
+between nodes needs opening: the return link's packets carry the nodes' own
+addresses and ride the mesh like any node-to-node traffic.
 
-Open the port with whatever manages the firewall on that node. That is the
-TCP/UDP port clients dial, on each interface named in the class, plus nothing
-between nodes: the return link's packets carry the nodes' own addresses and
-ride the mesh like any node-to-node traffic. If clients time out with clean
-status and zero DNAT counters, look here first.
+To find the chain that drops a packet, trace it. This adds a table `kuptrace`
+that marks one port for tracing, prints 30 seconds of trace while a client
+connects, and deletes the table again:
+
+```sh
+kubectl debug node/<node> -n kube-system --profile=sysadmin --image=alpine:3.24.2 --attach -- sh -c 'apk add -q nftables && nft add table inet kuptrace && nft add chain inet kuptrace pre "{ type filter hook prerouting priority -350; }" && nft add rule inet kuptrace pre udp dport <port> limit rate 2/second meta nftrace set 1 && timeout 30 nft monitor trace; nft delete table inet kuptrace'
+```
+
+The line ending in `(verdict drop)` names the table and chain that dropped the
+packet. [datapath.md](datapath.md#host-firewall) shows a trace of Talos's
+firewall dropping one before v0.7.0.
 
 ## MTU
 

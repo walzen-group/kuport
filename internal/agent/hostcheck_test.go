@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -138,6 +140,31 @@ func TestInterfaceAddr6(t *testing.T) {
 	}
 	if a, err := h.InterfaceAddr6("eth1"); err == nil {
 		t.Errorf("InterfaceAddr6 on a link-local-only interface = %q, want an error", a)
+	}
+}
+
+// TestLocalAddrs lists every address a client could dial across the node's
+// interfaces, both families, and leaves out loopback and link-local.
+func TestLocalAddrs(t *testing.T) {
+	nl := fakeNetlink{links: map[string]fakeLink{
+		"lo":     {index: 1, mtu: 65536, addrs: []string{"127.0.0.1", "::1"}},
+		"ens3":   {index: 2, mtu: 1500, addrs: []string{"152.53.141.215", "2a0a:4cc0:c1:468::48", "fe80::74b9"}},
+		"dummy0": {index: 3, mtu: 1500, addrs: []string{"10.10.111.3", "169.254.116.108"}},
+	}}
+	h := NewHost(fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), nl)
+
+	addrs, err := h.LocalAddrs()
+	if err != nil {
+		t.Fatalf("LocalAddrs: %v", err)
+	}
+	var got []string
+	for _, a := range addrs {
+		got = append(got, a.String())
+	}
+	sort.Strings(got)
+	want := []string{"10.10.111.3", "152.53.141.215", "2a0a:4cc0:c1:468::48"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("LocalAddrs = %q, want %q", got, want)
 	}
 }
 

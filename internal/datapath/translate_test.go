@@ -23,7 +23,7 @@ func TestDNATExprsTranslatePort(t *testing.T) {
 	}
 	var nat *expr.NAT
 	var protoMin []byte
-	for _, e := range nftExprs(r) {
+	for _, e := range nftExprs(r, nil) {
 		switch v := e.(type) {
 		case *expr.Immediate:
 			if v.Register == 2 {
@@ -61,7 +61,7 @@ func readFamilyExprs(t *testing.T, r Rule) familyExprs {
 	t.Helper()
 	got := familyExprs{nfproto: -1}
 	imm1 := 0 // width of the last immediate into register 1, read by a NAT
-	exprs := nftExprs(r)
+	exprs := nftExprs(r, nil)
 	for i, e := range exprs {
 		switch v := e.(type) {
 		case *expr.Meta:

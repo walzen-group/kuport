@@ -152,18 +152,36 @@ valid and a failure policy to choose.
 
 ## Host firewall
 
-kuport writes `nat` and `mangle` in its own table and never anything in `filter`.
-It also does not detect foreign filter rules.
-[troubleshooting.md](troubleshooting.md#the-host-firewall) tells the operator
-plainly: a node with a host firewall needs the port opened there by whatever
-manages that firewall, and kuport will report the mapping healthy while the port
-stays shut.
+A mapping answers on a node whose host firewall drops new connections to the
+node's own addresses, with no rule per port in that firewall. The class decides
+what is exposed: its nodes, the interfaces on each node, the namespaces allowed
+to ask, and the port window. A PortMap opens one port inside that window, on
+those interfaces, and nothing reaches an interface the class leaves out.
 
-Writing the accept rule and detecting a foreign one have the same portability
-problem across nftables, iptables-legacy, firewalld and ufw, and a wrong "looks
-fine" from a half-detection is worse than no check. The positive reason kuport
-stays out of `filter` entirely: a workload-authored PortMap must not be able to
-punch a hole in the host firewall.
+Opening each mapped port in the host firewall puts a second edit beside every
+PortMap, in whatever manages the firewall: on Talos, the machine config. The
+port is then written twice, and kuport reports the mapping healthy while it
+stays shut until someone makes that edit.
+
+Opening the class's port window once in the firewall avoids the second edit, but
+a firewall rule matches the port and not the address. It opens every listener
+on the node inside the window as well, Cilium's VXLAN port and node-exporter
+among them on a Talos node, so the window has to be cut around them.
+
+Translating ahead of the firewall from kup-pre cannot work. The kernel calls
+every nat chain from one hook at the dstnat priority, -100, whatever priority
+the chain declares, so kup-pre always runs after a filter chain at -110. v0.6.2
+moved kup-pre to `dstnat - 20` on the opposite belief, and a trace on a Talos
+node showed the packet dropped before kup-pre.
+
+kuport rewrites the destination before conntrack, from a filter chain, which
+does run at its declared priority. kup-raw replaces a node address with a
+stand-in the node does not hold, the firewall sees no node address and accepts
+the packet, kup-pre translates the stand-in, and kup-restore puts the node
+address back on the reply. [datapath.md](datapath.md#host-firewall) walks a
+packet through it. Both chains rewrite addresses and return no verdict, so a
+firewall that drops a packet on other grounds, forwarded traffic say, still
+drops it.
 
 ## Supporting other CNIs is not in scope
 

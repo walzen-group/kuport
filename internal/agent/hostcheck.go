@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,4 +138,36 @@ func (h *realHost) IPv6Forwarding() (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(string(b)) == "1", nil
+}
+
+// LocalAddrs reads every IPv4 and IPv6 address on every interface. Loopback,
+// link-local and multicast addresses are left out: no client dials them across
+// a host firewall. An interface that vanishes between the two netlink calls,
+// a pod's veth say, is skipped.
+func (h *realHost) LocalAddrs() ([]netip.Addr, error) {
+	links, err := h.nl.LinkList()
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Addr
+	for _, l := range links {
+		for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+			addrs, err := h.nl.AddrList(l, fam)
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ip, ok := netip.AddrFromSlice(a.IP)
+				if !ok {
+					continue
+				}
+				ip = ip.Unmap()
+				if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
+					continue
+				}
+				out = append(out, ip)
+			}
+		}
+	}
+	return out, nil
 }

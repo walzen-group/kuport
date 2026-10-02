@@ -52,6 +52,11 @@ type Inputs struct {
 	// IPv6 address; it makes no row not-ready.
 	InterfaceAddrs6 map[string]string
 
+	// LocalAddrs are every address the node holds, read from the host. They
+	// pass through to the State unchanged in content, sorted, for the
+	// datapath to steer a mapped packet addressed to one past a host firewall.
+	LocalAddrs []netip.Addr
+
 	// IPv6Forwarding is the host's net.ipv6.conf.all.forwarding. With it off
 	// the node cannot forward an IPv6 request to a pod, so Compute emits no
 	// IPv6 objects for this node and says so in its class rows.
@@ -220,7 +225,22 @@ func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, 
 		emitMapping(st, in, idx, m, alloc[m.pm.Spec.ClassName])
 	}
 	unifyLinkAddr6(st)
+	st.LocalAddrs = sortedAddrs(in.LocalAddrs)
 	sortState(st)
+}
+
+// sortedAddrs returns a sorted copy of addrs without duplicates, nil for none.
+func sortedAddrs(addrs []netip.Addr) []netip.Addr {
+	seen := map[netip.Addr]bool{}
+	var out []netip.Addr
+	for _, a := range addrs {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Less(out[j]) })
+	return out
 }
 
 // unifyLinkAddr6 gives every copy of a link the /127 when any copy has it. Each
