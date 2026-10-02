@@ -6,8 +6,10 @@ them contradict what the documentation suggests, which is why the measurements
 stay. The IPv6 rules in [IPv6](#ipv6) have been loaded into a kernel by the
 datapath tests and have not yet carried traffic on a cluster. The steering
 rules in [Host firewall](#host-firewall) carried TCP and UDP in both families
-through a copy of Talos's firewall chain in the datapath tests' network
-namespaces, and have not yet carried traffic on a cluster.
+through copies of Talos's firewall chain and netbird's rules in the datapath
+tests' network namespaces. On a live cluster they have carried IPv4 TCP so
+far: through Talos's firewall on a node's public interface, and over netbird's
+wt0 on another node.
 
 Two shapes cover everything: the pod sits on the node that accepted the packet,
 or it does not.
