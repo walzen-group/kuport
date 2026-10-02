@@ -7,15 +7,19 @@ import (
 )
 
 // A host firewall such as Talos's drops a new connection to one of the node's
-// own addresses from a filter chain in prerouting. kup-pre cannot translate
-// ahead of it: the kernel runs every nat chain from one hook at the dstnat
-// priority, whatever priority the chain itself declares. So kup-raw, a filter
-// chain hooked before conntrack, rewrites a mapped packet's destination from
-// the node's own address to a stand-in address the node does not hold. The
-// firewall then sees a destination that is not the node's, conntrack records
-// the stand-in, kup-pre translates it to the target as before, and kup-restore
-// rewrites the reply's source from the stand-in back to the node's address
-// once conntrack has undone the translation. docs/datapath.md has the walk.
+// own addresses from a filter chain in prerouting at -110. kup-pre cannot
+// translate ahead of it: the kernel runs every nat chain from one hook at the
+// dstnat priority, -100, whatever priority the chain itself declares. So
+// kup-steer, a filter chain at -120, rewrites a mapped packet's destination
+// from the node's own address to a stand-in address the node does not hold.
+//
+// By then conntrack (-200) has recorded the address the client dialed, so it
+// writes that address back as the reply's source once kup-pre's DNAT is
+// undone, and a mesh's rules at mangle (-150), netbird's mark for a local
+// destination among them, have seen the real address too. The firewall sees a
+// destination that is not the node's and accepts the packet, and kup-pre
+// translates the stand-in to the target as before. docs/datapath.md has the
+// walk.
 
 // SteerV4 and SteerV6 are the blocks the stand-in addresses come from. No
 // node may hold an address inside them, and a class's link subnets must stay
@@ -34,9 +38,9 @@ type Steer struct {
 // steerPairs gives every local address a stand-in in its own family, in sorted
 // address order. The link ends are local addresses as well: a request arriving
 // over a return link is addressed to this node's end of it. A stand-in that
-// moves to another address leaves an existing flow's conntrack entry behind;
-// the flow's next inbound packet opens a new one and the pod sees the same
-// five-tuple, so the flow carries on.
+// moves to another address affects no flow: conntrack holds the dialed address
+// and the DNAT target, and the stand-in only lives between kup-steer and
+// kup-pre.
 func steerPairs(s State) []Steer {
 	seen := map[netip.Addr]bool{}
 	var locals []netip.Addr

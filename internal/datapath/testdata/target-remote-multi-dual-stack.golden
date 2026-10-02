@@ -1,6 +1,6 @@
 table inet kuport {
-	chain kup-raw {
-		type filter hook prerouting priority raw - 10; policy accept;
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
 	}
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 20; policy accept;
@@ -20,8 +20,5 @@ table inet kuport {
 		ip6 saddr fd00:10:244:12::6b udp sport 3000 counter meta mark set ct mark
 		iifname "kup-da0d9a1d" counter ct mark set 0x6b700001
 		iifname "kup-e5b1c204" counter ct mark set 0x6b700002
-	}
-	chain kup-restore {
-		type filter hook postrouting priority srcnat + 10; policy accept;
 	}
 }

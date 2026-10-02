@@ -33,18 +33,18 @@ func delTable(conn NFTConn, t *nftables.Table) {
 	conn.DelTable(t)
 }
 
-// nftChains returns the five base chains in fixed order, hooked and prioritised
-// exactly as the golden headers describe: raw-10, dstnat-20, srcnat-10,
-// mangle+10, srcnat+10.
+// nftChains returns the four base chains in fixed order, hooked and prioritised
+// exactly as the golden headers describe: a filter chain at dstnat-20,
+// dstnat-20, srcnat-10, mangle+10.
 func nftChains(t *nftables.Table) []*nftables.Chain {
 	accept := nftables.ChainPolicyAccept
 	return []*nftables.Chain{
 		{
-			Name:     ChainRaw,
+			Name:     ChainSteer,
 			Table:    t,
 			Type:     nftables.ChainTypeFilter,
 			Hooknum:  nftables.ChainHookPrerouting,
-			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityRaw - 10),
+			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest - 20),
 			Policy:   &accept,
 		},
 		{
@@ -71,42 +71,31 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityMangle + 10),
 			Policy:   &accept,
 		},
-		{
-			Name:     ChainRestore,
-			Table:    t,
-			Type:     nftables.ChainTypeFilter,
-			Hooknum:  nftables.ChainHookPostrouting,
-			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATSource + 10),
-			Policy:   &accept,
-		},
 	}
 }
 
-// nftMaps returns the steer and restore maps of each family the plan steers,
-// with their elements: local address to stand-in, and stand-in to local
-// address.
+// nftMaps returns the steer map of each family the plan steers, with its
+// elements: local address to stand-in.
 func nftMaps(t *nftables.Table, steer []Steer) []nftMap {
 	var out []nftMap
 	for _, f := range []Family{FamilyIPv4, FamilyIPv6} {
-		var fwd, back []nftables.SetElement
+		var elems []nftables.SetElement
 		for _, p := range steer {
-			if familyOf(p.Local) != f {
-				continue
+			if familyOf(p.Local) == f {
+				elems = append(elems, nftables.SetElement{Key: addrBytes(p.Local), Val: addrBytes(p.Virtual)})
 			}
-			fwd = append(fwd, nftables.SetElement{Key: addrBytes(p.Local), Val: addrBytes(p.Virtual)})
-			back = append(back, nftables.SetElement{Key: addrBytes(p.Virtual), Val: addrBytes(p.Local)})
 		}
-		if len(fwd) == 0 {
+		if len(elems) == 0 {
 			continue
 		}
 		typ := nftables.TypeIPAddr
 		if f == FamilyIPv6 {
 			typ = nftables.TypeIP6Addr
 		}
-		out = append(out,
-			nftMap{set: &nftables.Set{Table: t, Name: steerMap(f), IsMap: true, KeyType: typ, DataType: typ}, elems: fwd},
-			nftMap{set: &nftables.Set{Table: t, Name: restoreMap(f), IsMap: true, KeyType: typ, DataType: typ}, elems: back},
-		)
+		out = append(out, nftMap{
+			set:   &nftables.Set{Table: t, Name: steerMap(f), IsMap: true, KeyType: typ, DataType: typ},
+			elems: elems,
+		})
 	}
 	return out
 }
@@ -169,12 +158,8 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 
 	// The rewrite comes before the counter, so a lookup that misses ends the
 	// rule uncounted and the counter shows packets actually rewritten.
-	switch r.Kind {
-	case KindSteer:
-		e = append(e, rewriteExprs(fam, false, lookupSet(sets, steerMap(fam)))...)
-		return append(e, &expr.Counter{})
-	case KindRestore:
-		e = append(e, rewriteExprs(fam, true, lookupSet(sets, restoreMap(fam)))...)
+	if r.Kind == KindSteer {
+		e = append(e, steerExprs(fam, lookupSet(sets, steerMap(fam)))...)
 		return append(e, &expr.Counter{})
 	}
 
@@ -361,18 +346,18 @@ func lookupSet(sets map[string]*nftables.Set, name string) *nftables.Set {
 	return &nftables.Set{Name: name}
 }
 
-// rewriteExprs replaces the destination (or, with src, the source) address
-// with what the map holds for it. A lookup that misses breaks the rule and
-// leaves the packet as it was.
+// steerExprs replaces the destination address with what the map holds for it.
+// A lookup that misses breaks the rule and leaves the packet as it was.
 //
 // IPv4 needs its header checksum fixed, and the TCP or UDP checksum through
 // the pseudo-header flag; the kernel skips a UDP checksum of zero. IPv6 has no
 // header checksum, and steerV6 picks a stand-in with the same ones' complement
 // sum as the address it replaces, so the transport checksum stays correct with
 // no update. That also keeps clear of google/nftables, which sends the
-// pseudo-header flag only together with a checksum type.
-func rewriteExprs(f Family, src bool, set *nftables.Set) []expr.Any {
-	offset, length := addrLoad(f, src)
+// pseudo-header flag only together with a checksum type. The DNAT that follows
+// rewrites the stand-in and fixes both checksums the way it always does.
+func steerExprs(f Family, set *nftables.Set) []expr.Any {
+	offset, length := addrLoad(f, false)
 	write := &expr.Payload{
 		OperationType:  expr.PayloadWrite,
 		SourceRegister: 1,

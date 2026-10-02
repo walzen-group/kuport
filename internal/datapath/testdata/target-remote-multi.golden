@@ -3,12 +3,8 @@ table inet kuport {
 		type ipv4_addr : ipv4_addr
 		elements = { 169.254.77.1 : 169.254.76.1, 169.254.77.3 : 169.254.76.2 }
 	}
-	map kup-restore4 {
-		type ipv4_addr : ipv4_addr
-		elements = { 169.254.76.1 : 169.254.77.1, 169.254.76.2 : 169.254.77.3 }
-	}
-	chain kup-raw {
-		type filter hook prerouting priority raw - 10; policy accept;
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
 		meta nfproto ipv4 iifname "kup-da0d9a1d" udp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
 		meta nfproto ipv4 iifname "kup-e5b1c204" udp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
 	}
@@ -26,9 +22,5 @@ table inet kuport {
 		ip saddr 10.244.18.107 udp sport 3000 counter meta mark set ct mark
 		iifname "kup-da0d9a1d" counter ct mark set 0x6b700001
 		iifname "kup-e5b1c204" counter ct mark set 0x6b700002
-	}
-	chain kup-restore {
-		type filter hook postrouting priority srcnat + 10; policy accept;
-		meta nfproto ipv4 ip saddr set ip saddr map @kup-restore4 counter
 	}
 }

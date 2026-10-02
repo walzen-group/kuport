@@ -21,10 +21,10 @@ sequenceDiagram
     participant N as edge-a, accepting and pod node
     participant P as Pod at 10.244.18.7
     C->>N: request: dst 203.0.113.9:3000, arrives on enp1s0
-    Note over N: kup-raw steers dst to its stand-in, kup-pre DNAT rewrites that to the pod address
+    Note over N: conntrack records dst 203.0.113.9:3000, kup-steer rewrites it to its stand-in, kup-pre DNAT rewrites that to the pod address
     N->>P: local delivery, kup-post identity SNAT claims the connection before the masquerade
     P-->>N: reply: src pod address, dst the client
-    N-->>C: conntrack reverses the DNAT to the stand-in, kup-restore writes 203.0.113.9:3000 as the src
+    N-->>C: conntrack reverses the DNAT, the reply src becomes the recorded 203.0.113.9:3000
     Note over N: no link device, no mark, no policy routing. That machinery exists only for the cross-node case.
 ```
 
@@ -38,15 +38,15 @@ sequenceDiagram
     participant T as Target node worker-b
     participant P as Pod at 10.244.18.107
     C->>E: request: dst 203.0.113.9:3000, src 198.51.100.7, arrives on enp1s0
-    Note over E: kup-raw steers dst to its stand-in, kup-pre DNAT rewrites that to the far end of the link to worker-b. src untouched.
+    Note over E: kup-steer rewrites dst to its stand-in, kup-pre DNAT rewrites that to the far end of the link to worker-b. src untouched.
     E->>T: kuport's own link, udp 4790, outer header edge-a to worker-b
     Note over T: addressed to this node, so it is delivered locally and traverses netfilter
-    Note over T: kup-raw steers this end's address to its stand-in, kup-mangle records which link it arrived on, kup-pre translates it to the pod
+    Note over T: kup-mangle records which link it arrived on, kup-steer rewrites this end's address to its stand-in, kup-pre translates it to the pod
     T->>P: the pod reads src 198.51.100.7
     P-->>T: reply: src 10.244.18.107:3000, dst 198.51.100.7
     Note over T: kup-mangle marks it from the flow, pref 102 diverts marked packets to the table
     T-->>E: the same link carries it back, inner src still the pod
-    Note over E: conntrack reverses the DNAT to the stand-in, kup-restore writes 203.0.113.9:3000 as the reply src
+    Note over E: conntrack reverses the DNAT, the reply src becomes the recorded 203.0.113.9:3000
     E-->>C: the answer comes from the address the client dialed
 ```
 
@@ -96,13 +96,10 @@ table inet kuport {
     type ipv4_addr : ipv4_addr
     elements = { <node address> : <stand-in>, ...one per address the node holds... }
   }
-  map kup-restore4 {
-    ...the same pairs the other way round...
-  }
-  ...kup-steer6 and kup-restore6 for IPv6...
+  ...kup-steer6 for IPv6...
 
-  chain kup-raw {
-    type filter hook prerouting priority raw - 10; policy accept;
+  chain kup-steer {
+    type filter hook prerouting priority dstnat - 20; policy accept;
     meta nfproto ipv4 iifname "<iface>" <proto> dport <port> ip daddr set ip daddr map @kup-steer4 counter
     meta nfproto ipv6 iifname "<iface>" <proto> dport <port> ip6 daddr set ip6 daddr map @kup-steer6 counter
     ...one per interface per family per mapping...
@@ -120,18 +117,12 @@ table inet kuport {
     oifname "<egress dev>" ip daddr <target> <proto> dport <target port> counter snat ip to ip saddr
     oifname "<egress dev>" ip6 daddr <target6> <proto> dport <target port> counter snat ip6 to ip6 saddr
   }
-
-  chain kup-restore {
-    type filter hook postrouting priority srcnat + 10; policy accept;
-    meta nfproto ipv4 ip saddr set ip saddr map @kup-restore4 counter
-    meta nfproto ipv6 ip6 saddr set ip6 saddr map @kup-restore6 counter
-  }
 }
 ```
 
 The `ip6` lines exist only for a mapping delivered over IPv6, which
-[IPv6](#ipv6) covers. kup-raw, kup-restore and the maps carry a mapping past a
-host firewall; [Host firewall](#host-firewall) walks a packet through them.
+[IPv6](#ipv6) covers. kup-steer and the maps carry a mapping past a host
+firewall; [Host firewall](#host-firewall) walks a packet through them.
 
 `<target>` is the pod's address when the pod is on this node, and the far end of
 this node's link to the pod's node when it is not. `<egress dev>` follows it:
@@ -174,10 +165,10 @@ masquerade rules does not break it.
 
 ```
 table inet kuport {
-  ...the steer and restore maps, as on the accepting node...
+  ...the steer maps, as on the accepting node...
 
-  chain kup-raw {
-    type filter hook prerouting priority raw - 10; policy accept;
+  chain kup-steer {
+    type filter hook prerouting priority dstnat - 20; policy accept;
     meta nfproto ipv4 iifname "kup-<peer>" <proto> dport <port> ip daddr set ip daddr map @kup-steer4 counter
     meta nfproto ipv6 iifname "kup-<peer>" <proto> dport <port> ip6 daddr set ip6 daddr map @kup-steer6 counter
     ...one per link per family...
@@ -200,8 +191,6 @@ table inet kuport {
     type filter hook prerouting priority mangle + 10; policy accept;
     ...the return marking, which differs by serving mode...
   }
-
-  ...kup-restore, as on the accepting node...
 }
 ```
 
@@ -220,8 +209,8 @@ route in each family.
 
 The prerouting rule matches the arrival device and this node's own end of that
 link, which keeps it to kuport's own traffic rather than anything else that
-reaches the device. The end is a local address, so kup-raw has replaced it with
-its stand-in by the time kup-pre runs, and the rule matches the stand-in.
+reaches the device. The end is a local address, so kup-steer has replaced it
+with its stand-in by the time kup-pre runs, and the rule matches the stand-in.
 
 The postrouting rule exempts the reply from the CNI's egress masquerade, which
 would otherwise rewrite its source to the node's own address and send it out that
@@ -257,23 +246,30 @@ net/netfilter/nf_nat_core.c inserts the chain into that hook's list. A nat
 chain's priority orders it among the other nat chains only, so no nat chain
 runs before a filter chain at -110.
 
-kuport therefore moves the destination out of the firewall's way before
-conntrack sees the packet, and puts it back on the reply. Take node-a from
+kuport therefore moves the destination out of the firewall's way from a filter
+chain, which does run at the priority it declares. Take node-a from
 [the worked example](#rendered-rules-for-a-dual-stack-mapping), which holds
 203.0.113.9 on eth0, and a TCP request to 203.0.113.9:3000:
 
 | Hook, priority | Step | Request destination after it |
 | --- | --- | --- |
-| prerouting, -310 | kup-raw: `ip daddr set ip daddr map @kup-steer4` | 169.254.76.3:3000 |
-| prerouting, -200 | conntrack records the flow | 169.254.76.3:3000 |
+| prerouting, -200 | conntrack records the flow, destination 203.0.113.9:3000 | 203.0.113.9:3000 |
+| prerouting, -150 | a mesh's mark rules see the node's own address | 203.0.113.9:3000 |
+| prerouting, -120 | kup-steer: `ip daddr set ip daddr map @kup-steer4` | 169.254.76.3:3000 |
 | prerouting, -110 | host firewall: 169.254.76.3 is no node address, so its rule accepts it | 169.254.76.3:3000 |
 | prerouting, -100 | kup-pre: DNAT | 169.254.77.1:3000 |
 
-| Hook, priority | Step | Reply source after it |
-| --- | --- | --- |
-| prerouting | arrives over kup-97459438 | 169.254.77.1:3000 |
-| postrouting, 100 | conntrack undoes the DNAT | 169.254.76.3:3000 |
-| postrouting, 110 | kup-restore: `ip saddr set ip saddr map @kup-restore4` | 203.0.113.9:3000 |
+conntrack recorded 203.0.113.9:3000 as the flow's destination, so when it
+undoes the DNAT on the reply it writes 203.0.113.9:3000 as the source. No rule
+of kuport's touches the reply, and the stand-in exists only between kup-steer
+and kup-pre.
+
+The window between -150 and -110 matters on both sides. v0.7.0 rewrote the
+destination at `raw - 10` (-310), before conntrack, and broke every mapping on
+netbird's wt0: netbird's `netbird-mangle-prerouting` at -150 marks a packet
+from wt0 only when `fib daddr type local`, its forward filter drops an unmarked
+one, and the stand-in is no local address. Below -110 the host firewall has
+already dropped the packet.
 
 The stand-ins come from 169.254.76.0/24 and fd6b:7570::/96. No node may hold
 an address in either block, and a class's `vxlan.subnet` must stay out of
@@ -282,32 +278,30 @@ and link-local left out, adds the ends of its return links, sorts them and
 numbers them in each family: node-a's 10.0.0.1, 169.254.77.0 and 203.0.113.9
 get .1, .2 and .3. A lookup that misses leaves the packet as it is, so a port
 dialed on an address the node does not hold, such as a routed virtual address
-under `Multi`, reaches kup-pre unchanged.
-
-When a new address shifts the numbering, a flow's conntrack entry still names
-the old stand-in. The flow's next inbound packet opens a new entry under the
-new one and the pod sees the same five-tuple, so the flow carries on.
+under `Multi`, reaches kup-pre unchanged. A new address that shifts the
+numbering changes nothing for a running flow, since conntrack holds the dialed
+address and the DNAT target.
 
 Rewriting an address changes the IPv4 header checksum and the TCP or UDP
-checksum, which covers both addresses through the pseudo-header. kup-raw and
-kup-restore fix both for IPv4. An IPv6 stand-in needs no fix: its last word is
-chosen so its 16-bit ones' complement sum equals the address it replaces, the
-way NPTv6 (RFC 6296) stays checksum-neutral. 2001:db8::9 sums to 0x2dc2, and so
-does its stand-in fd6b:7570::1:bae4. That holds whether a packet carries a full
-checksum or, coming from a pod's veth, a partial one.
+checksum, which covers both addresses through the pseudo-header. kup-steer
+fixes both for IPv4. An IPv6 stand-in needs no fix: its last word is chosen so
+its 16-bit ones' complement sum equals the address it replaces, the way NPTv6
+(RFC 6296) stays checksum-neutral. 2001:db8::9 sums to 0x2dc2, and so does its
+stand-in fd6b:7570::1:bae4.
 
-kup-raw and kup-restore rewrite addresses and return no verdict, so they let
-through nothing the firewall drops on other grounds. A firewall that drops
-forwarded traffic still drops a mapping's;
+kup-steer rewrites addresses and returns no verdict, so it lets through
+nothing the firewall drops on other grounds. A firewall that drops forwarded
+traffic still drops a mapping's;
 [the troubleshooting guide](troubleshooting.md#the-host-firewall) covers that
 case.
 
 `TestDeliversThroughHostFirewallOnRealKernel` in internal/datapath builds a
-client, a node and a pod namespace, puts a drop rule like Talos's on the node
-at -110, and sends UDP on a mapped port and TCP to a translated port, in both
-families. Every reply has to come from the address and port the client dialed.
-Before kup-raw existed all four exchanges timed out behind the drop rule; with
-it all four answer.
+client, a node and a pod namespace and sends UDP on a mapped port and TCP to a
+translated port, in both families, three times: with no filter, behind a drop
+rule like Talos's at -110, and behind that rule plus netbird's mark at -150 and
+forward filter. Every reply has to come from the address and port the client
+dialed. v0.6.2 timed out behind the drop rule, v0.7.0 timed out behind
+netbird's rules, and the current release answers in all three passes.
 
 ## Two rule-ordering constraints
 
@@ -432,20 +426,12 @@ table inet kuport {
 		type ipv4_addr : ipv4_addr
 		elements = { 10.0.0.1 : 169.254.76.1, 169.254.77.0 : 169.254.76.2, 203.0.113.9 : 169.254.76.3 }
 	}
-	map kup-restore4 {
-		type ipv4_addr : ipv4_addr
-		elements = { 169.254.76.1 : 10.0.0.1, 169.254.76.2 : 169.254.77.0, 169.254.76.3 : 203.0.113.9 }
-	}
 	map kup-steer6 {
 		type ipv6_addr : ipv6_addr
 		elements = { 2001:db8::9 : fd6b:7570::1:bae4, fd64:f5ac:e961:: : fd6b:7570::2:6995 }
 	}
-	map kup-restore6 {
-		type ipv6_addr : ipv6_addr
-		elements = { fd6b:7570::1:bae4 : 2001:db8::9, fd6b:7570::2:6995 : fd64:f5ac:e961:: }
-	}
-	chain kup-raw {
-		type filter hook prerouting priority raw - 10; policy accept;
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
 		meta nfproto ipv4 iifname "eth0" tcp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
 		meta nfproto ipv6 iifname "eth0" tcp dport 3000 ip6 daddr set ip6 daddr map @kup-steer6 counter
 	}
@@ -462,11 +448,6 @@ table inet kuport {
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
 	}
-	chain kup-restore {
-		type filter hook postrouting priority srcnat + 10; policy accept;
-		meta nfproto ipv4 ip saddr set ip saddr map @kup-restore4 counter
-		meta nfproto ipv6 ip6 saddr set ip6 saddr map @kup-restore6 counter
-	}
 }
 ```
 
@@ -478,20 +459,12 @@ table inet kuport {
 		type ipv4_addr : ipv4_addr
 		elements = { 10.0.0.2 : 169.254.76.1, 169.254.77.1 : 169.254.76.2 }
 	}
-	map kup-restore4 {
-		type ipv4_addr : ipv4_addr
-		elements = { 169.254.76.1 : 10.0.0.2, 169.254.76.2 : 169.254.77.1 }
-	}
 	map kup-steer6 {
 		type ipv6_addr : ipv6_addr
 		elements = { fd64:f5ac:e961::1 : fd6b:7570::1:6997 }
 	}
-	map kup-restore6 {
-		type ipv6_addr : ipv6_addr
-		elements = { fd6b:7570::1:6997 : fd64:f5ac:e961::1 }
-	}
-	chain kup-raw {
-		type filter hook prerouting priority raw - 10; policy accept;
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
 		meta nfproto ipv4 iifname "kup-8544dc0e" tcp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
 		meta nfproto ipv6 iifname "kup-8544dc0e" tcp dport 3000 ip6 daddr set ip6 daddr map @kup-steer6 counter
 	}
@@ -510,16 +483,11 @@ table inet kuport {
 		ip saddr 10.244.5.5 tcp sport 3000 counter meta mark set 0x6b700000
 		ip6 saddr fd00:10:244:5::5 tcp sport 3000 counter meta mark set 0x6b700000
 	}
-	chain kup-restore {
-		type filter hook postrouting priority srcnat + 10; policy accept;
-		meta nfproto ipv4 ip saddr set ip saddr map @kup-restore4 counter
-		meta nfproto ipv6 ip6 saddr set ip6 saddr map @kup-restore6 counter
-	}
 }
 ```
 
-node-a's IPv6 DNAT sends the request to fd64:f5ac:e961::1. node-b's kup-raw
-steers that address to fd6b:7570::1:6997, and node-b's IPv6 link rule matches
+node-a's IPv6 DNAT sends the request to fd64:f5ac:e961::1. node-b's kup-steer
+rewrites that address to fd6b:7570::1:6997, and node-b's IPv6 link rule matches
 the stand-in before writing the pod's address. Both of node-b's
 mark rules set 0x6b700000, slot 0's mark, and node-b's routing objects send
 either family back over kup-8544dc0e:

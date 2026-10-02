@@ -1,6 +1,6 @@
 table inet kuport {
-	chain kup-raw {
-		type filter hook prerouting priority raw - 10; policy accept;
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
 	}
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 20; policy accept;
@@ -13,8 +13,5 @@ table inet kuport {
 	}
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
-	}
-	chain kup-restore {
-		type filter hook postrouting priority srcnat + 10; policy accept;
 	}
 }

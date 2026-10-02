@@ -109,8 +109,6 @@ func nftText(r Rule) string {
 		b.WriteString("counter meta mark set ct mark")
 	case KindSteer:
 		fmt.Fprintf(&b, "%s daddr set %s daddr map @%s counter", l3Text(fam), l3Text(fam), steerMap(fam))
-	case KindRestore:
-		fmt.Fprintf(&b, "%s saddr set %s saddr map @%s counter", l3Text(fam), l3Text(fam), restoreMap(fam))
 	}
 	return b.String()
 }

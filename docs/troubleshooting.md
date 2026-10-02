@@ -103,7 +103,7 @@ kubectl debug node/<node> -n kube-system --profile=sysadmin --image=alpine:3.24.
 `kubectl debug` leaves the pod `node-debugger-<node>-<suffix>` in kube-system;
 delete it afterwards.
 
-You will see the maps, the five chains and, on each rule, `counter packets N bytes M`.
+You will see the maps, the four chains and, on each rule, `counter packets N bytes M`.
 A mapping delivered over IPv6 has an `ip6` rule beside each `ip` one, each
 with its own counter, so the table splits the path by family as well as by
 stage. A `table ip kuport` still present means the node runs an agent older
@@ -112,9 +112,8 @@ What a climb means, and what a zero means, stage by stage:
 
 | Rule | Counter climbing | Counter stuck at zero |
 | --- | --- | --- |
-| `kup-raw` steer (serving node) | packets addressed to one of the node's own addresses arrive at that interface and port and are steered to its stand-in | nothing addressed to a node address arrives on that tuple: wrong address dialed or upstream routing, or the client dials an address the node does not hold, which reaches kup-pre unsteered |
-| `kup-pre` DNAT (serving node) | the packet reached the translation | with `kup-raw` climbing, something between them drops it: trace it, see the host firewall below. With both at zero, nothing reaches the node on that tuple. Compare `published` against where the client actually sends |
-| `kup-restore` (serving node) | replies are rewritten back to the address the client dialed | with `kup-pre` climbing, no reply came back through conntrack: look at the pod, or at the target node for a remote pod |
+| `kup-steer` (serving node) | packets addressed to one of the node's own addresses arrive at that interface and port and are steered to its stand-in | nothing addressed to a node address arrives on that tuple, or a chain at a priority below -120 drops it: wrong address dialed, upstream routing, or a firewall in raw or mangle. A client dialing an address the node does not hold reaches kup-pre unsteered |
+| `kup-pre` DNAT (serving node) | the packet reached the translation | with `kup-steer` climbing, a chain between -120 and -100 drops it: trace it, see the host firewall below. With both at zero, nothing reaches the node on that tuple. Compare `published` against where the client actually sends |
 | `kup-post` with `oifname "cilium_host"` (same-node pod) | the inbound leg is being claimed before Cilium's masquerade; the pod should see the client address | with the DNAT counter climbing, the pod is on another node; look at the target node instead |
 | `kup-mangle` mark rule (target node) | replies from the pod are marked and policy-routed back to the serving node | the pod's replies do not match src and sport: it replies from another address or port, or it never received the request |
 | `kup-post` with `oifname != "cilium_*"` (target node) | the reply leaves through the return link toward the serving node | replies are taking some other route: check the ip rule ladder and the link, next sections |
@@ -212,7 +211,7 @@ default forward policy, a firewalld zone without forwarding, or any forward
 chain with a drop policy. kuport then reports the mapping fully healthy,
 `Accepted=True`, `Programmed=True` and `published` populated, because status
 describes the rules kuport owns and not the rest of the machine's. The
-`kup-raw` and `kup-pre` counters climb while the pod never sees the request.
+`kup-steer` and `kup-pre` counters climb while the pod never sees the request.
 Allow forwarding to the pod network with whatever manages that firewall. Nothing
 between nodes needs opening: the return link's packets carry the nodes' own
 addresses and ride the mesh like any node-to-node traffic.

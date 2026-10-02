@@ -117,6 +117,55 @@ func deliversThroughHostFirewall(t *testing.T) {
 	exchangeAll(t, client, "without the host firewall")
 	hostFirewall(t, conn)
 	exchangeAll(t, client, "behind the host firewall")
+	meshFilter(t, conn)
+	exchangeAll(t, client, "behind the host firewall and the mesh's forward filter")
+}
+
+// meshFilter writes the two netbird rules a mapping on wt0 passes through: at
+// mangle priority it marks a packet from the interface whose destination is a
+// local address, and its forward filter drops every packet from the interface
+// that carries no mark. A rewrite of the destination ahead of the mark rule
+// leaves the packet unmarked and the forward filter drops it.
+func meshFilter(t *testing.T, conn *nftables.Conn) {
+	t.Helper()
+	const mark = 0x1bd20
+	accept := nftables.ChainPolicyAccept
+	tbl := conn.AddTable(&nftables.Table{Name: "mesh", Family: nftables.TableFamilyINet})
+	pre := conn.AddChain(&nftables.Chain{
+		Name:     "mangle-prerouting",
+		Table:    tbl,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityMangle,
+		Policy:   &accept,
+	})
+	fwd := conn.AddChain(&nftables.Chain{
+		Name:     "forward-filter",
+		Table:    tbl,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookForward,
+		Priority: nftables.ChainPriorityFilter,
+		Policy:   &accept,
+	})
+	iif := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		ifnameCmp("up0", false),
+	}
+	conn.AddRule(&nftables.Rule{Table: tbl, Chain: pre, Exprs: append(append([]expr.Any{}, iif...),
+		&expr.Fib{Register: 1, FlagDADDR: true, ResultADDRTYPE: true},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(unix.RTN_LOCAL)},
+		&expr.Immediate{Register: 1, Data: binaryutil.NativeEndian.PutUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1},
+	)})
+	conn.AddRule(&nftables.Rule{Table: tbl, Chain: fwd, Exprs: append(append([]expr.Any{}, iif...),
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(mark)},
+		&expr.Counter{},
+		&expr.Verdict{Kind: expr.VerdictDrop},
+	)})
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("mesh filter: %v", err)
+	}
 }
 
 // exchangeAll dials every mapping from the client namespace and checks the

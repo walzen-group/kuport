@@ -63,8 +63,8 @@ func TestSteerPairs(t *testing.T) {
 }
 
 // TestRenderSteersEachDNAT checks the rules a mapping gets on a node with local
-// addresses: a steer rule beside each DNAT rule, one restore rule per steered
-// family, a link DNAT rule pinned to its end's stand-in, and the maps' entries.
+// addresses: a steer rule beside each DNAT rule, a link DNAT rule pinned to its
+// end's stand-in, and the map's entries.
 func TestRenderSteersEachDNAT(t *testing.T) {
 	end := netip.MustParseAddr("169.254.77.1")
 	s := State{
@@ -81,11 +81,10 @@ func TestRenderSteersEachDNAT(t *testing.T) {
 		got = append(got, r.Chain+": "+nftText(r))
 	}
 	want := []string{
-		`kup-raw: meta nfproto ipv4 iifname "ens3" udp dport 9987 ip daddr set ip daddr map @kup-steer4 counter`,
-		`kup-raw: meta nfproto ipv4 iifname "kup-1" udp dport 9987 ip daddr set ip daddr map @kup-steer4 counter`,
+		`kup-steer: meta nfproto ipv4 iifname "ens3" udp dport 9987 ip daddr set ip daddr map @kup-steer4 counter`,
+		`kup-steer: meta nfproto ipv4 iifname "kup-1" udp dport 9987 ip daddr set ip daddr map @kup-steer4 counter`,
 		`kup-pre: meta nfproto ipv4 iifname "ens3" udp dport 9987 counter dnat ip to 10.244.18.107:9987`,
 		`kup-pre: iifname "kup-1" ip daddr 169.254.76.2 udp dport 9987 counter dnat ip to 10.244.18.107:9987`,
-		`kup-restore: meta nfproto ipv4 ip saddr set ip saddr map @kup-restore4 counter`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("rules:\n%s\nwant:\n%s", join(got), join(want))

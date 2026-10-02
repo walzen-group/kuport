@@ -174,14 +174,20 @@ the chain declares, so kup-pre always runs after a filter chain at -110. v0.6.2
 moved kup-pre to `dstnat - 20` on the opposite belief, and a trace on a Talos
 node showed the packet dropped before kup-pre.
 
-kuport rewrites the destination before conntrack, from a filter chain, which
-does run at its declared priority. kup-raw replaces a node address with a
-stand-in the node does not hold, the firewall sees no node address and accepts
-the packet, kup-pre translates the stand-in, and kup-restore puts the node
-address back on the reply. [datapath.md](datapath.md#host-firewall) walks a
-packet through it. Both chains rewrite addresses and return no verdict, so a
-firewall that drops a packet on other grounds, forwarded traffic say, still
-drops it.
+Rewriting the destination before conntrack, at `raw - 10`, gets past the
+firewall and breaks a mesh. v0.7.0 did that, and netbird's mark rule at -150,
+which marks a packet from wt0 only when its destination is local, no longer saw
+the node's address; netbird's forward filter then dropped every mapping on wt0.
+
+kuport rewrites the destination from kup-steer, a filter chain at -120, which
+runs at its declared priority: after conntrack has recorded the dialed address
+and after a mesh's mark rules, before the firewall. kup-steer replaces a node
+address with a stand-in the node does not hold, the firewall sees no node
+address and accepts the packet, and kup-pre translates the stand-in. conntrack
+writes the dialed address back onto the reply, as it always did.
+[datapath.md](datapath.md#host-firewall) walks a packet through it. kup-steer
+rewrites addresses and returns no verdict, so a firewall that drops a packet on
+other grounds, forwarded traffic say, still drops it.
 
 ## Supporting other CNIs is not in scope
 
