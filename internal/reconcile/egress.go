@@ -203,6 +203,11 @@ func decidePaths(in Inputs, idx *index, decisions []*egressDecision, alloc linkA
 				continue
 			}
 
+			// A powered-off node keeps its class row, so its Node's Ready
+			// condition is what takes the path down.
+			if !nodeReady(idx, d.node) || !nodeReady(idx, p.node) {
+				continue
+			}
 			slot, ok := alloc.slotFor(egressClassKey(d.class.Name), d.node, p.node)
 			if !ok || !egressRowReady(d.class, d.node) || !egressRowReady(d.class, p.node) {
 				continue
@@ -251,7 +256,10 @@ func emitEgressPodNode(st *datapath.State, in Inputs, idx *index, d *egressDecis
 		path v1alpha1.EgressPath
 		f    datapath.Family
 	}
-	fams := []fam{{p.addr, p.path, datapath.FamilyIPv4}}
+	var fams []fam
+	if p.addr.IsValid() {
+		fams = append(fams, fam{p.addr, p.path, datapath.FamilyIPv4})
+	}
 	if p.addr6.IsValid() && in.IPv6Forwarding {
 		fams = append(fams, fam{p.addr6, p.path6, datapath.FamilyIPv6})
 	}
@@ -329,8 +337,10 @@ func keepState(in Inputs, decisions []*egressDecision) datapath.State {
 			if p.node != in.NodeName || !p.failClosed || p.path == v1alpha1.EgressPathLocal {
 				continue
 			}
-			st.Egress = append(st.Egress, datapath.EgressRule{SrcAddr: p.addr, Mark: datapath.EgressBlockedMark})
-			fams[datapath.FamilyIPv4] = true
+			if p.addr.IsValid() {
+				st.Egress = append(st.Egress, datapath.EgressRule{SrcAddr: p.addr, Mark: datapath.EgressBlockedMark})
+				fams[datapath.FamilyIPv4] = true
+			}
 			if p.addr6.IsValid() && in.IPv6Forwarding {
 				st.Egress = append(st.Egress, datapath.EgressRule{SrcAddr: p.addr6, Mark: datapath.EgressBlockedMark})
 				fams[datapath.FamilyIPv6] = true
@@ -377,6 +387,23 @@ func podCIDRsKnown(in Inputs) bool {
 		}
 	}
 	return len(in.Nodes) > 0
+}
+
+// nodeReady reports a Node's Ready condition. A Node reporting no Ready
+// condition counts as ready; one whose condition is False or Unknown, which the
+// node controller sets about 40 seconds after the kubelet stops reporting, does
+// not.
+func nodeReady(idx *index, name string) bool {
+	n := idx.nodesByName[name]
+	if n == nil {
+		return false
+	}
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return true
 }
 
 func egressClassRow(class *v1alpha1.EgressClass, name string) *v1alpha1.NodeStatus {
@@ -517,7 +544,8 @@ func egressProgrammed(in Inputs, d *egressDecision, alloc linkAlloc, cidrsKnown 
 		c.Message = fmt.Sprintf("all %d slots of the cluster-wide link pool are taken", linkSlots)
 	case len(down) > 0:
 		c.Reason = v1alpha1.ReasonReturnPathUnavailable
-		c.Message = "no link to " + d.node + " yet for " + strings.Join(down, ", ")
+		c.Message = "the path to " + d.node + " is down for " + strings.Join(down, ", ") +
+			": no Link yet, a node not ready, or a class row missing or not ready"
 	default:
 		c.Status, c.Reason = metav1.ConditionTrue, v1alpha1.ReasonAllPodsRouted
 	}

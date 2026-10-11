@@ -226,6 +226,45 @@ func TestEgressPathDownWhileARowIsNotReady(t *testing.T) {
 	}
 }
 
+// TestEgressIPv6OnlyPodEmitsNoIPv4Rule: a pod with no IPv4 address gets no
+// IPv4 rule, here or in the state kept at shutdown; an invalid source address
+// fails the render.
+func TestEgressIPv6OnlyPodEmitsNoIPv4Rule(t *testing.T) {
+	in := egressWorld("node-b", true)
+	in.IPv6Forwarding = true
+	in.Pods = []*corev1.Pod{podOn("media", "qb-0", "node-b", "fd00:10:244:5::5")}
+	res := Compute(in)
+	for _, st := range []datapath.State{res.State, res.Keep} {
+		for _, e := range st.Egress {
+			if !e.SrcAddr.IsValid() {
+				t.Errorf("egress rule with an invalid source: %+v", st.Egress)
+			}
+		}
+	}
+}
+
+// TestEgressNodeNotReadyTakesThePathDown: a powered-off egress node keeps its
+// class row, so the Node's Ready condition is what tells the pod's node to stop
+// sending into the link: Direct under failClosed false, Blocked under true.
+func TestEgressNodeNotReadyTakesThePathDown(t *testing.T) {
+	for _, fc := range []bool{false, true} {
+		in := egressWorld("node-b", fc)
+		in.Nodes[0].Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown}}
+		st := Compute(in).State
+		switch {
+		case !fc && len(st.Egress) != 0:
+			t.Errorf("failClosed=false: egress = %+v, want none while node-a is not ready", st.Egress)
+		case fc && (len(st.Egress) != 1 || st.Egress[0].Mark != datapath.EgressBlockedMark):
+			t.Errorf("failClosed=true: egress = %+v, want the blocked mark while node-a is not ready", st.Egress)
+		}
+	}
+	// A Node reporting no Ready condition at all, as the fixtures do, counts as
+	// ready, so a cluster whose status lacks it keeps working.
+	if st := Compute(egressWorld("node-b", true)).State; len(st.Egress) != 1 || st.Egress[0].Mark != linkMark(3) {
+		t.Errorf("egress = %+v, want the link's mark with no Ready condition reported", st.Egress)
+	}
+}
+
 func TestEgressPodOnTheEgressNodeIsLocal(t *testing.T) {
 	in := egressWorld("node-a", true)
 	in.Pods = []*corev1.Pod{podOn("media", "qb-0", "node-a", "10.244.0.7")}
