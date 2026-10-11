@@ -50,8 +50,8 @@ differently, install on a staging cluster first and walk
 
 - [docs/overview.md](docs/overview.md): the problem, the goals, and what a
   cluster has to provide.
-- [docs/api.md](docs/api.md): both kinds field by field, and what status
-  reports.
+- [docs/api.md](docs/api.md): the three kinds field by field, what status
+  reports, and the agent's flags.
 - [docs/datapath.md](docs/datapath.md): the packet's path, every rule on it
   with the measurement that confirmed it, and the serving modes.
 - [docs/troubleshooting.md](docs/troubleshooting.md): a mapping is not working,

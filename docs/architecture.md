@@ -15,7 +15,7 @@ changes the input on every agent at once, through the same watch.
 
 ```mermaid
 flowchart LR
-    W["Watched objects: PortMapClass, PortMap, EndpointSlice, Node, Namespace"] --> C["reconcile.Compute(Inputs). The same pure function, on every agent."]
+    W["Watched objects: PortMapClass, PortMap, Link, EndpointSlice, Node, Namespace"] --> C["reconcile.Compute(Inputs). The same pure function, on every agent."]
     C --> ST["datapath.State for THIS node"]
     C --> SU["status this node owns"]
     ST --> AP["datapath.Apply"]
@@ -67,8 +67,8 @@ Emission on a node that accepts the mapping:
    of this node's own return link, keeping the port the client dialed.
 2. The masquerade exemption for the inbound leg, following the device the packet
    leaves by.
-3. When the chosen pod is on another node, this end of the return link, once its
-   address slot has landed in the class status.
+3. When the chosen pod is on another node, this end of the return link, once
+   the pair's Link object is in this agent's cache.
 
 Emission on the node holding the chosen pod, when another node forwards to it:
 
@@ -89,36 +89,60 @@ refused or endpoint-less mapping has no serving node, so its status falls to the
 chosen endpoint's node, else the first accepting node by name, else the first
 node in the cluster: one writer in every case.
 
-The class status has its own single-writer rule per field: each node writes its
-own `nodes` row, and only the agent holding a mapping's endpoint proposes a
-`links` claim. Two agents claiming the same pair collide on the API server's
-optimistic concurrency, and the loser re-reads and adopts the winner's slot.
+The class status is written by the class's accepting nodes alone. Each one
+writes its own `nodes` row and the class conditions, which every accepting node
+computes the same way. A node that only holds a mapping's pod writes nothing to
+the class.
 
-For a remote pod the forwarding node waits on the pod's node, because the claim
-for their link pair is proposed there. Until it lands in the class status the
-mapping reports `Programmed=False` with reason `ReturnPathUnavailable` and a
-message naming the missing pair. The class status write is itself watched, so
-the next pass sees the settled claim and the condition clears.
+A return link's slot lives in a cluster-scoped Link object named `slot-<n>`.
+The agent holding a mapping's pod creates the Link for each pair it needs: it
+reads the Links in its cache, picks the lowest slot none of them holds, and
+creates that name. When two agents pick the same slot, the API server accepts
+the first create and answers the second with AlreadyExists. The second agent
+ignores the error; the watch brings the winner's Link into its cache, and its
+next pass picks another slot. Every agent proposes slots for its missing pairs
+in sorted order of class and node names, so two agents with the same cache
+propose the same slots.
+
+No agent builds the mark, the divert rules, the device or the routes of a slot
+until that slot's Link is in its cache, so a slot whose create the API server
+refused never marks a packet.
+
+A holder whose cache has not yet shown its own create can create a second Link
+for the same pair on another slot. Every agent uses the lower slot, and the
+holder deletes the other Link.
+
+For a remote pod the forwarding node waits on the pod's node, because the Link
+for their pair is created there. Until the Link reaches the forwarding node's
+cache, the mapping reports `Programmed=False` with reason
+`ReturnPathUnavailable` and the message `return link for edge-a/worker-b is not
+claimed yet`. Links are watched, so the next pass sees the new Link and the
+condition clears.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant T as Target agent worker-b
+    participant O as Agent on another node
     participant API as API server
     participant E as Forwarding agent edge-a
-    T->>API: GET portmapclass public
-    API-->>T: status.links, no claim for edge-a/worker-b
-    Note over T: lowest free slot is 1: 169.254.77.2/31, table 201, mark 0x6b700001
-    T->>API: UPDATE status adding the claim at resourceVersion n
-    API--xT: 409 Conflict (another node just wrote its nodes row)
-    T->>API: re-read the class
-    API-->>T: links still unclaimed, newer resourceVersion
-    T->>API: UPDATE the claim again
-    API-->>T: accepted
-    E->>API: the watch delivers the settled claim
-    Note over E: builds its half: device kup-(hash of class and worker-b), address 169.254.77.3/31, vni base plus slot
+    Note over T: no Link for public, edge-a/worker-b. Its cache holds no Link, so it picks slot 0
+    O->>API: CREATE Link slot-0 for a pair of its own
+    API-->>O: created
+    T->>API: CREATE Link slot-0, PortMapClass public, peers edge-a and worker-b
+    API--xT: 409 AlreadyExists
+    Note over T: ignores the error and builds nothing on slot 0
+    API-->>T: the watch delivers the other agent's slot-0
+    Note over T: next pass: the lowest slot no Link holds is 1
+    T->>API: CREATE Link slot-1, PortMapClass public, peers edge-a and worker-b
+    API-->>T: created
+    API-->>E: the watch delivers slot-1
+    API-->>T: the watch delivers slot-1
+    Note over E: builds its half: kup-1, VNI 7001, address 169.254.64.2/31
+    Note over T: builds its half: kup-1, VNI 7001, address 169.254.64.3/31, mark 0x6b700001, table 10001
 ```
 
-The claim settles the whole derivation: the /31 ends are fixed by the sorted
-node names, so both halves compute each other's address without exchanging
-anything beyond the recorded slot.
+The slot settles the whole derivation: the /31 ends are fixed by the sorted
+node names, so both halves compute each other's address from the Link's name
+and exchange nothing else. [api.md](api.md#link) lists every number a slot
+fixes and which agent may update or delete a Link.

@@ -171,15 +171,15 @@ table inet kuport {
 
   chain kup-steer {
     type filter hook prerouting priority dstnat - 20; policy accept;
-    meta nfproto ipv4 iifname "kup-<peer>" <proto> dport <port> ip daddr set ip daddr map @kup-steer4 counter
-    meta nfproto ipv6 iifname "kup-<peer>" <proto> dport <port> ip6 daddr set ip6 daddr map @kup-steer6 counter
+    meta nfproto ipv4 iifname "kup-<n>" <proto> dport <port> ip daddr set ip daddr map @kup-steer4 counter
+    meta nfproto ipv6 iifname "kup-<n>" <proto> dport <port> ip6 daddr set ip6 daddr map @kup-steer6 counter
     ...one per link per family...
   }
 
   chain kup-pre {
     type nat hook prerouting priority dstnat - 20; policy accept;
-    iifname "kup-<peer>" ip daddr <stand-in of this end of that /31> <proto> dport <port> counter dnat ip to <pod ip>:<pod port>
-    iifname "kup-<peer>" ip6 daddr <stand-in of this end of that /127> <proto> dport <port> counter dnat ip6 to [<pod ip6>]:<pod port>
+    iifname "kup-<n>" ip daddr <stand-in of this end of that /31> <proto> dport <port> counter dnat ip to <pod ip>:<pod port>
+    iifname "kup-<n>" ip6 daddr <stand-in of this end of that /127> <proto> dport <port> counter dnat ip6 to [<pod ip6>]:<pod port>
     ...one per link per family...
   }
 
@@ -206,8 +206,8 @@ ip -6 route add default via <peer's IPv6 link address> dev <link> table <table>
 
 The `ip6` rules and the two `-6` commands exist only for a mapping delivered
 over IPv6. They reuse the mark and the table of the IPv4 ones; the kernel
-keeps a table's IPv4 and IPv6 routes apart, so table 200 holds one default
-route in each family.
+keeps a table's IPv4 and IPv6 routes apart, so table 10000, slot 0's table,
+holds one default route in each family.
 
 The prerouting rule matches the arrival device and this node's own end of that
 link, which keeps it to kuport's own traffic rather than anything else that
@@ -259,7 +259,7 @@ chain, which does run at the priority it declares. Take node-a from
 | prerouting, -150 | a mesh's mark rules see the node's own address | 203.0.113.9:3000 |
 | prerouting, -120 | kup-steer: `ip daddr set ip daddr map @kup-steer4` | 169.254.76.3:3000 |
 | prerouting, -110 | host firewall: 169.254.76.3 is no node address, so its rule accepts it | 169.254.76.3:3000 |
-| prerouting, -100 | kup-pre: DNAT | 169.254.77.1:3000 |
+| prerouting, -100 | kup-pre: DNAT | 169.254.64.1:3000 |
 
 conntrack recorded 203.0.113.9:3000 as the flow's destination, so when it
 undoes the DNAT on the reply it writes 203.0.113.9:3000 as the source. No rule
@@ -274,11 +274,11 @@ one, and the stand-in is no local address. Below -110 the host firewall has
 already dropped the packet.
 
 The stand-ins come from 169.254.76.0/24 and fd6b:7570::/96. No node may hold
-an address in either block, and a class's `vxlan.subnet` must stay out of
-169.254.76.0/24. Each pass the agent reads every address on the node, loopback
-and link-local left out, adds the ends of its return links, sorts them and
-numbers them in each family: node-a's 10.0.0.1, 169.254.77.0 and 203.0.113.9
-get .1, .2 and .3. A lookup that misses leaves the packet as it is, so a port
+an address in either block, and the link pool's 169.254.64.0/21 and
+fd64:f5ac:e961::1:0/112 sit outside both. Each pass the agent reads every
+address on the node, loopback and link-local left out, adds the ends of its
+return links, sorts them and numbers them in each family: node-a's 10.0.0.1,
+169.254.64.0 and 203.0.113.9 get .1, .2 and .3. A lookup that misses leaves the packet as it is, so a port
 dialed on an address the node does not hold, such as a routed virtual address
 under `Multi`, reaches kup-pre unchanged. A new address that shifts the
 numbering changes nothing for a running flow, since conntrack holds the dialed
@@ -322,9 +322,9 @@ left.
 
 ```mermaid
 flowchart TD
-    A["marked reply at worker-b egress: fwmark 0x6b700001, dst the client 198.51.100.7"] --> B{"pref 101: fwmark 0x6b700001 AND dst in 100.64.93.143/32? lookup main"}
-    B -- "mark matches, destination does not" --> C{"pref 102: fwmark 0x6b700001? lookup 201"}
-    C -- match --> D["table 201: default via 169.254.77.2 dev kup-(hash of class and edge-a)"]
+    A["marked reply at worker-b egress, on the link in slot 1: fwmark 0x6b700001, dst the client 198.51.100.7"] --> B{"pref 101: fwmark 0x6b700001 AND dst in 100.64.93.143/32? lookup main"}
+    B -- "mark matches, destination does not" --> C{"pref 102: fwmark 0x6b700001? lookup 10001"}
+    C -- match --> D["table 10001: default via 169.254.64.2 dev kup-1"]
     D --> E["outer packet: dst 100.64.93.143, and the vxlan driver has copied the mark onto it"]
     E --> F{"pref 101 again, now on the outer packet"}
     F -- "mark AND destination both match" --> G["lookup main: the mesh route carries it to edge-a"]
@@ -333,33 +333,43 @@ flowchart TD
     V --> W["pref 105: netbird resolve, pref 110: netbird catch-all, pref 254: main"]
 ```
 
-## The link
+## Link devices
 
 ```
-ip link add <name> type vxlan id <vni> local <own address> remote <peer address> \
-  dstport <port> ttl 64 mtu <link mtu>
-ip addr add <link address>/31 dev <name>
-ip -6 addr add <link address6>/127 dev <name>
-ip link set <name> up
+ip link add kup-<n> type vxlan id <vni> local <own address> remote <peer address> \
+  dstport <link port> ttl 64 mtu <link mtu>
+ip addr add <link address>/31 dev kup-<n>
+ip -6 addr add <link address6>/127 dev kup-<n>
+ip link set kup-<n> up
 ```
 
-The device name is `kup-` plus the first eight hex digits of sha256 of the class
-name and the peer's node name, so both ends independently name the same device
-and two classes over one node pair do not collide. The two addresses of the /31
-are fixed by the sorted pair: the alphabetically first node takes the lower
-address. The /127 comes from `returnPath.vxlan.subnet6` at the same slot and
-splits the same way, so slot 7 of fd64:f5ac:e961::/112 gives the first node
-fd64:f5ac:e961::e and the second fd64:f5ac:e961::f. The device holds the /127
-only while a mapping over it is delivered over IPv6.
+Each link gets its numbers from the slot n of its [Link object](api.md#link),
+which the API server lets only one link in the cluster hold. Both ends read the
+same Link, so they name the device `kup-<n>` and agree on everything below
+without exchanging anything:
 
-The VNI is the class's base plus the slot, because the kernel keys a vxlan device
-by VNI and destination port, so two links on one node cannot share both.
+| Value | From slot n | Slot 7 |
+| --- | --- | --- |
+| device | `kup-<n>` | kup-7 |
+| VNI | 7000 + n | 7007 |
+| IPv4 ends | the nth /31 of 169.254.64.0/21 | 169.254.64.14 and 169.254.64.15 |
+| IPv6 ends | the nth /127 of fd64:f5ac:e961::1:0/112 | fd64:f5ac:e961::1:e and fd64:f5ac:e961::1:f |
+
+The alphabetically first node of the pair holds the lower address in each
+family. The device holds the /127 only while a mapping over it is delivered over
+IPv6.
+
+The kernel keys a vxlan device by VNI and destination port. Every link uses the
+same port, so the VNI carries the slot, and two links on one node never share a
+VNI. Two classes linking the same two nodes get two Links and two devices.
 
 The outer header carries the two nodes' addresses, which the mesh accepts, so no
 key material is involved and nothing needs renewing. Measured: 12ms across two
 sites on the first try.
 
-The port must differ from the CNI's, 8472 for Cilium.
+`<link port>` is the agent's `--link-port`, 4790 unless set, and the same on
+every node. It must differ from the CNI's, 8472 for Cilium;
+[api.md](api.md#agent-flags) has the flag.
 
 ## IPv6
 
@@ -414,8 +424,9 @@ carries, so the IPv4 guard is the one it meets.
 
 The reconcile tests compute this fixture: node-a accepts on eth0, the pod sits
 on node-b at 10.244.5.5 and fd00:10:244:5::5, the mapping is TCP 3000 under
-`Single`, and the pair holds slot 0. node-a sorts first, so it holds
-169.254.77.0/31 and fd64:f5ac:e961::/127, and node-b holds the .1 and ::1 ends.
+`Single`, and the pair's Link is `slot-0`, so the link is kup-0 with VNI 7000.
+node-a sorts first, so it holds 169.254.64.0/31 and fd64:f5ac:e961::1:0/127,
+and node-b holds the 169.254.64.1 and fd64:f5ac:e961::1:1 ends.
 The blocks below are its State through `datapath.Render`, with the addresses
 each agent would read off its host: 10.0.0.1, 203.0.113.9 and 2001:db8::9 on
 node-a, 10.0.0.2 on node-b.
@@ -426,11 +437,11 @@ node-a, the accepting node:
 table inet kuport {
 	map kup-steer4 {
 		type ipv4_addr : ipv4_addr
-		elements = { 10.0.0.1 : 169.254.76.1, 169.254.77.0 : 169.254.76.2, 203.0.113.9 : 169.254.76.3 }
+		elements = { 10.0.0.1 : 169.254.76.1, 169.254.64.0 : 169.254.76.2, 203.0.113.9 : 169.254.76.3 }
 	}
 	map kup-steer6 {
 		type ipv6_addr : ipv6_addr
-		elements = { 2001:db8::9 : fd6b:7570::1:bae4, fd64:f5ac:e961:: : fd6b:7570::2:6995 }
+		elements = { 2001:db8::9 : fd6b:7570::1:bae4, fd64:f5ac:e961::1:0 : fd6b:7570::2:6996 }
 	}
 	chain kup-steer {
 		type filter hook prerouting priority dstnat - 20; policy accept;
@@ -439,13 +450,13 @@ table inet kuport {
 	}
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 20; policy accept;
-		meta nfproto ipv4 iifname "eth0" tcp dport 3000 counter dnat ip to 169.254.77.1:3000
-		meta nfproto ipv6 iifname "eth0" tcp dport 3000 counter dnat ip6 to [fd64:f5ac:e961::1]:3000
+		meta nfproto ipv4 iifname "eth0" tcp dport 3000 counter dnat ip to 169.254.64.1:3000
+		meta nfproto ipv6 iifname "eth0" tcp dport 3000 counter dnat ip6 to [fd64:f5ac:e961::1:1]:3000
 	}
 	chain kup-post {
 		type nat hook postrouting priority srcnat - 10; policy accept;
-		oifname "kup-97459438" ip daddr 169.254.77.1 tcp dport 3000 counter snat ip to ip saddr
-		oifname "kup-97459438" ip6 daddr fd64:f5ac:e961::1 tcp dport 3000 counter snat ip6 to ip6 saddr
+		oifname "kup-0" ip daddr 169.254.64.1 tcp dport 3000 counter snat ip to ip saddr
+		oifname "kup-0" ip6 daddr fd64:f5ac:e961::1:1 tcp dport 3000 counter snat ip6 to ip6 saddr
 	}
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
@@ -459,21 +470,21 @@ node-b, the pod's node:
 table inet kuport {
 	map kup-steer4 {
 		type ipv4_addr : ipv4_addr
-		elements = { 10.0.0.2 : 169.254.76.1, 169.254.77.1 : 169.254.76.2 }
+		elements = { 10.0.0.2 : 169.254.76.1, 169.254.64.1 : 169.254.76.2 }
 	}
 	map kup-steer6 {
 		type ipv6_addr : ipv6_addr
-		elements = { fd64:f5ac:e961::1 : fd6b:7570::1:6997 }
+		elements = { fd64:f5ac:e961::1:1 : fd6b:7570::1:6998 }
 	}
 	chain kup-steer {
 		type filter hook prerouting priority dstnat - 20; policy accept;
-		meta nfproto ipv4 iifname "kup-8544dc0e" tcp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
-		meta nfproto ipv6 iifname "kup-8544dc0e" tcp dport 3000 ip6 daddr set ip6 daddr map @kup-steer6 counter
+		meta nfproto ipv4 iifname "kup-0" tcp dport 3000 ip daddr set ip daddr map @kup-steer4 counter
+		meta nfproto ipv6 iifname "kup-0" tcp dport 3000 ip6 daddr set ip6 daddr map @kup-steer6 counter
 	}
 	chain kup-pre {
 		type nat hook prerouting priority dstnat - 20; policy accept;
-		iifname "kup-8544dc0e" ip daddr 169.254.76.2 tcp dport 3000 counter dnat ip to 10.244.5.5:3000
-		iifname "kup-8544dc0e" ip6 daddr fd6b:7570::1:6997 tcp dport 3000 counter dnat ip6 to [fd00:10:244:5::5]:3000
+		iifname "kup-0" ip daddr 169.254.76.2 tcp dport 3000 counter dnat ip to 10.244.5.5:3000
+		iifname "kup-0" ip6 daddr fd6b:7570::1:6998 tcp dport 3000 counter dnat ip6 to [fd00:10:244:5::5]:3000
 	}
 	chain kup-post {
 		type nat hook postrouting priority srcnat - 10; policy accept;
@@ -488,19 +499,19 @@ table inet kuport {
 }
 ```
 
-node-a's IPv6 DNAT sends the request to fd64:f5ac:e961::1. node-b's kup-steer
-rewrites that address to fd6b:7570::1:6997, and node-b's IPv6 link rule matches
+node-a's IPv6 DNAT sends the request to fd64:f5ac:e961::1:1. node-b's kup-steer
+rewrites that address to fd6b:7570::1:6998, and node-b's IPv6 link rule matches
 the stand-in before writing the pod's address. Both of node-b's
 mark rules set 0x6b700000, slot 0's mark, and node-b's routing objects send
-either family back over kup-8544dc0e:
+either family back over kup-0:
 
 | Object on node-b | Value |
 | --- | --- |
 | IPv4 rule, pref 101 | fwmark 0x6b700000 to 10.0.0.1/32 lookup main |
-| IPv4 rule, pref 102 | fwmark 0x6b700000 lookup 200 |
-| IPv6 rule, pref 102 | fwmark 0x6b700000 lookup 200 |
-| table 200, IPv4 | default via 169.254.77.0 dev kup-8544dc0e |
-| table 200, IPv6 | default via fd64:f5ac:e961:: dev kup-8544dc0e |
+| IPv4 rule, pref 102 | fwmark 0x6b700000 lookup 10000 |
+| IPv6 rule, pref 102 | fwmark 0x6b700000 lookup 10000 |
+| table 10000, IPv4 | default via 169.254.64.0 dev kup-0 |
+| table 10000, IPv6 | default via fd64:f5ac:e961::1:0 dev kup-0 |
 
 The golden rulesets in `internal/datapath/testdata/` named `*-dual-stack` pin
 the same rule shapes, `Multi` included.
@@ -581,18 +592,16 @@ spec:
       interfaces: [wt0]
   returnPath:
     mode: Vxlan
-    vxlan:
-      vni: 4300
-      subnet: 169.254.79.0/24
 ```
 
 Clients dial one address that every worker holds. Whichever worker receives the
 packet forwards it to the single chosen pod, and the pod's node sends each reply
 back to the worker that forwarded it.
 
-The class carries its own `vni` and `subnet` because its accepting nodes overlap
-with `public` above, and two classes numbering slots from zero would collide on
-the first VNI and the first /31.
+A worker running a pod of a `public` mapping holds a link of `public` beside
+the links of `intranet`. Neither class sets a link number: each link gets its
+VNI, addresses, mark and table from its own Link object, and no two Links share
+a slot.
 
 ### Why Multi needs conntrack
 
@@ -608,7 +617,7 @@ the forwarder, and the pod's node records it in the only place that spans a
 request and its reply:
 
 ```
-request in on kup-<peer>   ->  ct mark set <peer mark>     (meta mark untouched,
+request in on kup-<n>      ->  ct mark set <link mark>     (meta mark untouched,
                                                             so the request is not
                                                             diverted on its way in)
 reply from the pod         ->  meta mark set ct mark       (then pref 101/102 as
@@ -668,7 +677,7 @@ flowchart TD
     D --> E
     E -- yes --> F["no link is needed: the reply passes back through the conntrack entry that translated the request"]
     E -- no --> G{"returnPath.mode"}
-    G -- Vxlan --> H["a link, a /31 slot and a routing table for each programming node that lacks the pod"]
+    G -- Vxlan --> H["a link on its own Link slot for each programming node that lacks the pod"]
     G -- None --> I["Programmed=False with ReturnPathUnavailable, the programmer set is cleared, and no node writes a DNAT rule"]
 ```
 

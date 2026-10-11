@@ -85,7 +85,7 @@ claim is made here that it is done.
 
 | Document | For |
 | --- | --- |
-| [api.md](api.md) | the two kinds, their fields, and what status reports |
+| [api.md](api.md) | the three kinds, their fields, and what status reports |
 | [architecture.md](architecture.md) | how the agents divide the work between them |
 | [datapath.md](datapath.md) | the packet's path and every rule on it |
 | [decisions.md](decisions.md) | why the design is shaped this way |

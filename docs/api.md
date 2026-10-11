@@ -1,7 +1,8 @@
 # API
 
-Group `kuport.wlz.li`, version `v1alpha1`. Two kinds: a class the admin writes
-and a mapping the workload writes.
+Group `kuport.wlz.li`, version `v1alpha1`. Three kinds: a class the admin
+writes, a mapping the workload writes, and the Link objects the agents write for
+their return links.
 
 ## PortMapClass
 
@@ -32,11 +33,6 @@ spec:
       kuport.wlz.li/public: allowed
   returnPath:
     mode: Vxlan
-    vxlan:
-      vni: 4242
-      port: 4790
-      subnet: 169.254.77.0/24
-      subnet6: fd64:f5ac:e961::/112
 ```
 
 | Field | Type | Meaning |
@@ -48,16 +44,13 @@ spec:
 | ports.reserved | list of int | Ports the admin keeps back. A PortMap naming one is rejected in status. |
 | namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
 | returnPath.mode | enum | `Vxlan` or `None`. `None` refuses any mapping that would need a return link. |
-| returnPath.vxlan.vni | int | Base VXLAN network identifier for the links this class builds. Each slot takes the base plus its own number, because the kernel keys a device by VNI and port. |
-| returnPath.vxlan.port | int | UDP port for the links. Must differ from the CNI's, which is 8472 for Cilium. Default 4790. |
-| returnPath.vxlan.subnet | CIDR | Link addresses are allocated from here, a /31 per node pair (RFC 3021 point-to-point), so the default gives 128 slots. The slot for a pair is a recorded claim in status.links rather than a computed hash. Default 169.254.77.0/24. |
-| returnPath.vxlan.subnet6 | IPv6 CIDR | IPv6 link addresses are allocated from here, a /127 per node pair (RFC 6164) at the pair's slot in `subnet`. The API refuses a prefix that is not IPv6, and one holding fewer /127s than `subnet` holds /31s. Default fd64:f5ac:e961::/112, a ULA prefix whose 40 random bits follow RFC 4193. |
+| returnPath.vxlan.vni, port, subnet, subnet6 | | Deprecated and ignored. The schema keeps them for one release so an existing manifest still validates, and a class that sets one reports `Deprecated=True` naming it. Leave the vxlan block out. |
 
-Two classes whose accepting nodes overlap need their own `vni` and `subnet`. A
-class numbers its slots from zero, so two classes sharing a node would both ask
-for the base VNI and the first /31 there, and the kernel refuses the second of
-each. When both classes deliver IPv6, give them their own `subnet6` too, or the
-first /127 collides the same way.
+A class sets no link numbers. Each link gets its VNI, addresses, packet mark,
+routing table and device name from its own [Link](#link), and its UDP port from
+the agent's [--link-port](#agent-flags). No two Links share a slot, so two
+classes whose accepting nodes overlap build their links on different numbers
+with nothing set on either class.
 
 ## PortMap
 
@@ -242,16 +235,11 @@ heals it.
 
 ## Class status
 
-The class reports each selected node's readiness verdict and which return links
-hold an address slot.
+The class's accepting nodes write its status, the `nodes` rows and the
+conditions. A node that only holds a mapping's pod writes nothing to the class.
 
 ```yaml
 status:
-  links:
-    - key: edge-a/worker-b
-      peers: [edge-a, worker-b]
-      subnet: 169.254.77.2/31
-      slot: 1
   nodes:
     - name: edge-a
       ready: true
@@ -267,16 +255,17 @@ status:
       message: interface wt0 not present
   observedGeneration: 2
   conditions:
+    - type: Deprecated
+      status: "False"
+      reason: NoDeprecatedFields
     - type: Ready
       status: "True"
       reason: Valid
 ```
 
-One `links` entry per node pair that has, or recently had, a return link. The
-`unusedSince` field appears when no PortMap needs the pair and is set to the
-time that became true; an entry unused for 24h is dropped. The slot fixes the
-routing table (`200 + slot`), the packet mark (`0x6b700000 | slot`) and the
-link's VNI, so a claim is never renumbered while a link uses it.
+Releases up to v0.7.1 also wrote `status.links` here, one entry per node pair
+with a return link. The class's accepting agents remove the field on their first
+pass, and the claims live in [Link](#link) objects.
 
 One `nodes` row per accepting node, written by that node's agent, carrying the
 MTU numbers and interface addresses it read from the host. The row is ready when
@@ -299,7 +288,99 @@ troubleshooting.md](troubleshooting.md#mtu) has the reading.
 
 | Condition | True when | Notable false reasons |
 | --- | --- | --- |
-| Ready | the subnet parses, has a free slot, subnet6 is a usable IPv6 prefix, and the link port does not collide with the CNI's | `VxlanPortConflict`, `SubnetExhausted`, `InvalidSubnet` |
+| Ready | the link pool has a slot for every pair the class needs, and the agent's link port differs from the CNI's tunnel port | `VxlanPortConflict`, `SubnetExhausted` |
+| Deprecated | the class sets a field kuport ignores. The reason is `DeprecatedField`, and the message names each field as `returnPath.vxlan.<field>` | `NoDeprecatedFields`, the healthy state |
 
-`TunnelModeRequired` was a fourth reason until v0.4.0, when both legs moved onto
-kuport's own return link and the CNI's routing mode stopped deciding anything.
+Deprecated leaves Ready alone: a class that sets `returnPath.vxlan.vni` still
+works, and the field has no effect.
+
+`SubnetExhausted` carries the message `all 1024 slots of the cluster-wide link
+pool are taken`. `TunnelModeRequired` was another false reason until v0.4.0,
+when both legs moved onto kuport's own return link and the CNI's routing mode
+stopped deciding anything. `InvalidSubnet` went with the per-class subnets after
+v0.7.1.
+
+## Link
+
+Cluster-scoped. The agents write it; a person reads it. Each Link holds one slot
+of the cluster-wide pool for one return link between two nodes.
+
+```yaml
+apiVersion: kuport.wlz.li/v1alpha1
+kind: Link
+metadata:
+  name: slot-1
+spec:
+  classKind: PortMapClass
+  className: public
+  peers: [edge-a, worker-b]
+status: {}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| metadata.name | string | `slot-<n>`, n from 0 to 1023. The name is the slot, so the API server refuses a second Link on the same slot. |
+| spec.classKind | enum | `PortMapClass`. The schema also accepts `EgressClass`, which no kind in this release writes. Immutable, like the whole spec. |
+| spec.className | string | The class the link serves. Two classes linking the same two nodes get a Link each. |
+| spec.peers | list of two strings | The two node names, sorted. |
+| status.unusedSince | time | Set when no mapping needs the link, cleared when one needs it again. Absent while the link is in use. |
+
+### Numbers a slot fixes
+
+| Number | Slot n | slot-1 between edge-a and worker-b |
+| --- | --- | --- |
+| VXLAN VNI | 7000 + n | 7001 |
+| IPv4 ends | the nth /31 of 169.254.64.0/21 | edge-a 169.254.64.2, worker-b 169.254.64.3 |
+| IPv6 ends | the nth /127 of fd64:f5ac:e961::1:0/112 | edge-a fd64:f5ac:e961::1:2, worker-b fd64:f5ac:e961::1:3 |
+| packet mark | 0x6b700000, n's low 8 bits in bits 0-7, its next 2 bits in bits 12-13 | 0x6b700001 (slot 300 gives 0x6b70102c) |
+| routing table | 10000 + n | 10001 |
+| device name | `kup-<n>` | kup-1 |
+| UDP port | the agent's `--link-port`, the same for every link | 4790 |
+
+The alphabetically first node holds the low address of each pair, in both
+families. A link whose MTU is below 1280 carries IPv4 alone.
+
+### Who writes a Link
+
+| Write | Agent | When |
+| --- | --- | --- |
+| create `slot-<n>` | the agent holding a mapping's pod on that pair | a needed pair has no Link. It picks the lowest slot no Link in its cache holds, and an AlreadyExists answer sends it to the next pass |
+| set `status.unusedSince` | any agent | no mapping needs the pair |
+| clear `status.unusedSince` | any agent | a mapping needs the pair again |
+| delete | any agent | `unusedSince` is more than 24 hours old |
+| delete | the agent holding the pod | two Links name the same class and peers; every agent uses the lower slot, and this agent deletes the other |
+
+Every status write and delete carries the resourceVersion the agent read, so a
+write against a Link another agent has changed is dropped and decided again on
+the next pass. [architecture.md](architecture.md#status-writing) has the
+sequence, and [decisions.md](decisions.md#link-address-allocation) the reasons
+for a cluster-wide pool.
+
+`kubectl get links` prints one row per Link:
+
+| Column | From |
+| --- | --- |
+| NAME | `slot-<n>` |
+| KIND | spec.classKind |
+| CLASS | spec.className |
+| PEERS | spec.peers |
+| UNUSED-SINCE | status.unusedSince, as an age; empty while a mapping needs the link |
+
+## Agent flags
+
+Each flag falls back to an environment variable, which is how the DaemonSet
+sets them.
+
+| Flag | Variable | Default | Meaning |
+| --- | --- | --- | --- |
+| --node-name | NODE_NAME | none | this node's name; the DaemonSet sets it from spec.nodeName |
+| --log-level | LOG_LEVEL | info | debug, info, warn or error |
+| --resync | RESYNC | 5m | informer resync period |
+| --health-addr | HEALTH_ADDR | :8081 | address of /healthz and /readyz |
+| --link-port | LINK_PORT | 4790 | UDP port of every return link |
+
+`--link-port` needs the same value on every node, because each end of a link
+sends to the port the other end listens on. It must differ from the CNI's tunnel
+port, 8472 for Cilium; when the two match, every Vxlan class reports
+`Ready=False` with `VxlanPortConflict`. It replaces the deprecated class field
+`returnPath.vxlan.port`.

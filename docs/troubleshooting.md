@@ -47,9 +47,21 @@ kubectl get portmapclass <name> -o yaml
 ```
 
 Read `status.nodes` (one row per node the class selects: ready, message, the
-MTU numbers and the interface addresses it resolved) and `status.links` (one
-entry per node pair that holds a return-link address slot, with its key,
-subnet and slot).
+MTU numbers and the interface addresses it resolved) and the Ready and
+Deprecated conditions.
+
+The return links are cluster-scoped Link objects, one per node pair a class
+needs:
+
+```sh
+kubectl get links
+```
+
+Each row names a slot, `slot-<n>`, with the class kind, the class, the two
+nodes and, for a link no mapping needs, how long ago that became true. Slot n
+gives the device `kup-<n>`, a mark of `0x6b70` and the slot in its low bits,
+and the routing table 10000 + n; [api.md](api.md#link) lists every number a
+slot fixes.
 
 Logs come from the DaemonSet:
 
@@ -76,18 +88,24 @@ Every reason the code can write, and the first thing to check for each.
 | TargetPortInUse | Accepted | False | an earlier mapping uses the same Service port and protocol, and one of the two translates to another port. The message names the earlier mapping | keep one mapping per Service port, or give the second port its own named port on the Service and the pod |
 | AllNodesReady | Programmed | True | the serving node has written its rules, its row in the class status reports ready, and a remote pod's return link has landed with addresses at both ends | if the port still fails traffic, the fault is outside the rules: see the host firewall and counters |
 | NoReadyEndpoint | Programmed | False | the named port of the referenced Service has no ready endpoint; the DNAT rule is removed, so the port refuses (reset, ICMP unreachable) instead of blackholing | `kubectl -n <ns> get endpointslice -k kubernetes.io/service-name=<svc>`; readiness of the pods |
-| ReturnPathUnavailable | Programmed | False | the pod is on another node and its return path is not up: the class mode is None, the link pair's claim has not landed in the class status yet, or a node on the path has no usable address. A missing claim is a window that closes by itself while the agents exchange the write; a None mode is a decision | the class `returnPath` and its Ready condition; if the reason repeats beyond a couple of passes, whether the pod's node runs an agent that can propose the claim |
+| ReturnPathUnavailable | Programmed | False | the pod is on another node and its return path is not up: the class mode is None, the pair's Link has not reached the serving node yet (`return link for <pair> is not claimed yet`), or a node on the path has no usable address. A missing Link is a window that closes by itself once the pod's node creates it and the watch delivers it; a None mode is a decision | the class `returnPath` and its Ready condition, then `kubectl get links` for the pair; if the reason repeats beyond a couple of passes, whether the pod's node runs an agent that can create the Link |
 | NodeNotReady | Programmed | False | the serving node's row in the class status is missing or reports not ready, or the class selects no accepting node at all. The message names the serving node and what its row said, like `serving node edge-a is not ready: interface wt0 not present` | the DaemonSet pod on that node, the node itself, and the class `nodes[]` row's message |
 
 ### PortMapClass conditions
 
 | Reason | Status | Meaning | First check |
 | --- | --- | --- | --- |
-| Valid | True | the subnet parses and has free slots; tunnel mode and port checks are overlaid by the agents from the host | nothing, this is the healthy state |
+| Valid | True | the link pool has a slot for every pair the class needs; the port check is overlaid by the agents from the host | nothing, this is the healthy state |
 | TunnelModeRequired | False | the agent read the CNI's configuration and it is not tunneling (for Cilium: `routing-mode` is not `tunnel`), so the inbound leg cannot preserve the client address | `kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.routing-mode}'` |
-| VxlanPortConflict | False | the class link port equals the CNI's VXLAN port (8472 on Cilium); the links would swallow the CNI's own traffic | change `returnPath.vxlan.port` |
-| SubnetExhausted | False | every /31 slot in `returnPath.vxlan.subnet` is claimed; a new pair cannot be allocated | widen the subnet (a /24 gives 128 slots); claims of pairs unused for 24h are dropped by the GC on their own |
-| InvalidSubnet | False | `returnPath.vxlan.subnet` does not parse as a CIDR, or `subnet6` is not an IPv6 prefix holding a /127 for every /31 of `subnet`. The API refuses both, so this reason means a class written past that check; with only `subnet6` wrong, the links carry IPv4 alone | fix the field the message names |
+| VxlanPortConflict | False | the agent's link port (`--link-port`, 4790 unless set) equals the CNI's VXLAN port (8472 on Cilium); the links would swallow the CNI's own traffic | set LINK_PORT on the DaemonSet to another port, the same on every node |
+| SubnetExhausted | False | `all 1024 slots of the cluster-wide link pool are taken`: 1024 Link objects exist, and a new pair gets none | `kubectl get links`; the agents delete a Link 24 hours after its UNUSED-SINCE, so the pool refills on its own once mappings stop needing links |
+
+The Deprecated condition sits beside Ready and leaves Ready unchanged:
+
+| Reason | Status | Meaning | First check |
+| --- | --- | --- | --- |
+| NoDeprecatedFields | False | the class sets no field kuport ignores | nothing, this is the healthy state |
+| DeprecatedField | True | the class sets `returnPath.vxlan.vni`, `port`, `subnet` or `subnet6`, which kuport ignores; the message names each one | remove the vxlan block from the class. The link port is the agent's `--link-port` |
 
 ## The counters
 
@@ -133,7 +151,7 @@ message of any kind, and increments the device's transmit error counter.
 Spot it with:
 
 ```sh
-ip -s link show dev kup-<hash>
+ip -s link show dev kup-<n>
 ```
 
 Expected result on a healthy node: RX and TX climbing, TX ERRORS staying flat.
@@ -148,8 +166,8 @@ ip rule list | grep 0x6b70
 ```
 
 You should see two lines per active link: pref 101 (to the peer's /32, lookup
-main) and pref 102 (lookup the per-slot table). One line per link is the
-loop.
+main) and pref 102 (lookup the slot's table, 10000 + n for `kup-<n>`). One
+line per link is the loop.
 
 A link carrying IPv6 adds one IPv6 rule, the pref 102 divert with the same mark
 and table:
@@ -275,6 +293,7 @@ What happens to the host state when the agent moves:
 | Clean shutdown (SIGTERM, rolling update, node drain) | the agent removes its nftables table, its kup- links, its routing rules and routes. A node taken out of a class stops holding state nobody wants |
 | Crash (OOM, node power loss) | the rules stay. The next start reconciles: it rewrites the table whole and removes owned objects the new desired state does not name |
 | Rolling update of the DaemonSet | `maxUnavailable: 1`, one node at a time. On each node there is a window of seconds where the table is gone and rebuilt: the port refuses during the window, and established connections through that node are dropped, because flushing the table drops their NAT bindings |
+| Upgrade from v0.7.1 or earlier | as a rolling update, and each node's first pass rebuilds every link under its Link slot. A link between an upgraded node and an old one does not carry traffic until both run the new agent; [integration.md](integration.md#upgrading-from-v071-or-earlier) has the steps |
 | Endpoint pod reschedules | every agent recomputes the choice, so the DNAT target changes on the serving node's next pass and another accepting node may take over serving. Old connections do not carry over; the port refuses for the gap and serves again once the new endpoint is ready |
 
 The rollout interruptions are the accepted cost of the NoReadyEndpoint

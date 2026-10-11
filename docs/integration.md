@@ -81,8 +81,11 @@ echo kuport-probe | nc -u <A's mesh address> 4790
 Expected result: the line appears on A. The outer packets of a return link
 carry the two nodes' mesh addresses, so this is the same admission any
 node-to-node traffic needs; it fails only when the mesh filters UDP. Pick
-another port in that case and carry it into the class as
-`returnPath.vxlan.port`.
+another port in that case and set it as the LINK_PORT environment variable on
+the agent DaemonSet, which the agent reads as `--link-port`. Every node needs
+the same port, because each end of a link sends to the port the other end
+listens on. The chart has no value for LINK_PORT, so a chart install that needs
+another port has to add the variable to the rendered DaemonSet.
 
 ### Step 4: MTU headroom
 
@@ -134,7 +137,7 @@ artifact.
 | --- | --- |
 | `kuport-<version>.yaml` | the rendered deploy tree: namespace, ServiceAccount, ClusterRole, DaemonSet, with the image already pinned to the release's digest |
 | `kuport-<version>.tgz` | the Helm chart, same contents, parameterized |
-| `crds-<version>.yaml` | both CustomResourceDefinitions on their own version track |
+| `crds-<version>.yaml` | the CustomResourceDefinitions for PortMapClass, PortMap and Link, on their own version track |
 
 The plain manifests are the default. Choose the chart when the `classes`
 value (which creates PortMapClass objects with the release) is easier than a
@@ -168,17 +171,18 @@ edit and admin roles. A subject already bound to one of those in a namespace
 can work with PortMaps there, the same way it can with Deployments and
 Services. Nothing has to be rebound.
 
-The two kinds are scoped so that RBAC splits along the line the design already
+The kinds are scoped so that RBAC splits along the line the design already
 draws.
 
 | Kind | Scope | Held by |
 | --- | --- | --- |
 | PortMapClass | cluster | the cluster's administrator: which nodes accept, on which interfaces, which ports, which namespaces |
 | PortMap | namespaced | the workload: asks for a port on a class |
+| Link | cluster | the agents: one return-link slot per object, created and deleted by the agents' own ClusterRole |
 
-portmapclasses appears in neither aggregated role, deliberately. A namespace
-admin asks for a port and cannot widen the port range, add an accepting node,
-or admit its own namespace to a class.
+portmapclasses and links appear in neither aggregated role, deliberately. A
+namespace admin asks for a port and cannot widen the port range, add an
+accepting node, or admit its own namespace to a class.
 
 serviceRef carries a name and a port and no namespace, so a PortMap always
 resolves its Service in its own namespace. A mapping in one namespace cannot
@@ -266,10 +270,6 @@ spec:
       kuport.wlz.li/public: allowed
   returnPath:
     mode: Vxlan
-    vxlan:
-      vni: 4242
-      port: 4790
-      subnet: 169.254.77.0/24
 ```
 
 Why this shape. `nodes` names the nodes that hold the addresses clients dial:
@@ -310,17 +310,14 @@ Which fields are decisions and which are defaults:
 
 | Field | Decision or default | Notes |
 | --- | --- | --- |
-| servingMode | default Single | `Multi` puts the rules on every accepting node, which is what a routed virtual address needs. It costs a return link per accepting node without the pod and depends on conntrack; see docs/datapath.md |
+| servingMode | default Single | `Multi` puts the rules on every accepting node, which is what a routed virtual address needs. It needs a return link per accepting node without the pod and depends on conntrack; see docs/datapath.md |
 | nodes | decision | must be written; every accepting node by name |
 | nodes.&lt;name&gt;.interfaces | decision | must be written; the names that exist on that node, so nodes with different NIC names belong to one class |
 | ports | default 1..65535 | worth narrowing on a public class |
 | ports.reserved | default none | the admin keeps ports back; nothing else respects them |
 | namespaceSelector | policy decision | empty means every namespace may ask; on a public class that is rarely what you want |
 | returnPath.mode | decision | required; Vxlan or None. Which mappings None refuses, and the reply path that makes the refusal necessary, are in docs/datapath.md under returnPath mode |
-| returnPath.vxlan.vni | default 4242 | anything that does not collide with other vxlan use on the mesh |
-| returnPath.vxlan.port | default 4790 | must differ from the CNI's 8472 |
-| returnPath.vxlan.subnet | default 169.254.77.0/24 | /31 per node pair, 128 slots; link-local space avoids route table surgery |
-| returnPath.vxlan.subnet6 | default fd64:f5ac:e961::/112 | /127 per node pair at the same slot, used only for IPv6 delivery; must hold as many /127s as subnet holds /31s |
+| returnPath.vxlan | ignored, leave it out | every link gets its VNI and addresses from a cluster-wide pool of Link objects, and its port from the agent's LINK_PORT. A class that sets vni, port, subnet or subnet6 reports `Deprecated=True`; docs/api.md has the numbers |
 
 Labels the selectors match do not exist until you create them:
 
@@ -443,3 +440,50 @@ Then upgrade the agent through whichever path you installed by. The order
 matters only when a schema change adds a field the agent writes: new CRDs,
 then new agent. Deleting the agent's CRDs while objects exist deletes every
 PortMap, so no tool should ever do it for you.
+
+### Upgrading from v0.7.1 or earlier
+
+Releases after v0.7.1 number every return link from a cluster-scoped Link
+object, which the agent watches from its first start.
+
+1. Apply the new CRD bundle, which adds the Link CRD:
+
+   ```sh
+   kubectl apply -f crds-<new-version>.yaml
+   ```
+
+   An agent started before the Link CRD exists cannot watch Links and does not
+   become ready.
+
+2. Upgrade the agent. On each node, the first pass of the new agent creates a
+   Link for each pair it holds a pod for, builds the `kup-<n>` devices, and
+   removes the old devices named by a hash, their routes in tables 200 and up,
+   and the pref 101 and 102 rules for the old marks. All of them carry kuport's
+   names and none is in the new desired state.
+
+   A connection through a cross-node mapping that is open during that pass
+   loses its return path once. A mapping whose pod runs on its serving node has
+   no link and keeps its connections. Until both nodes of a pair run the new
+   agent, the two ends of their link use different VNIs and addresses, so a
+   cross-node mapping between an upgraded node and one still on the old agent
+   does not answer until the rolling update reaches the second node.
+
+3. Check the pool:
+
+   ```sh
+   kubectl get links
+   ```
+
+   Expected result: one row per node pair a class needs a link for, named
+   `slot-0` upwards.
+
+4. Remove the `vxlan:` block from every class that has one. Its fields are
+   ignored. Then read the class conditions:
+
+   ```sh
+   kubectl get portmapclass <name> -o jsonpath='{.status.conditions}'
+   ```
+
+   Expected result: `Deprecated=False` with reason `NoDeprecatedFields`. A
+   `Deprecated=True` condition names the fields still set. The class's accepting
+   agents remove the old `status.links` on their first pass.

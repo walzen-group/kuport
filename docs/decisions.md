@@ -33,9 +33,9 @@ then happens on the node that owns it.
 forwards and the identity is never ambiguous. It moved because the alternative
 was maintaining two datapaths for the rest of the project's life, and because
 doing so drops both of kuport's CNI requirements rather than dropping them for
-one mode. What it costs is Hubble's view of the request leg, which had already
-lost the reply leg when the return path was built. The conntrack cost that was
-quoted against it turned out to be nothing: both nodes already held an entry per
+one mode. Hubble no longer sees the request leg; it had already lost the reply
+leg when the return path was built. The conntrack cost that was quoted against
+it turned out to be nothing: both nodes already held an entry per
 flow, and measurement showed the pod's node holding an `[UNREPLIED]` record of
 the reply. The change makes that entry a proper established flow instead.
 
@@ -100,38 +100,87 @@ The DNAT rule is removed. The port then refuses, with a TCP reset or an ICMP
 port-unreachable, rather than blackholing, and the mapping reports
 `Programmed=False` with reason `NoReadyEndpoint`.
 
-A client learns immediately instead of hanging until its own timeout. The cost is
-accepted on both sides: connections do not survive a rollout, and the old rule is
-never left in place to keep them alive.
+A client learns immediately instead of hanging until its own timeout. We accept
+the consequence on both sides: connections do not survive a rollout, and the old
+rule is never left in place to keep them alive.
 
 ## Link address allocation
 
-A recorded claim in `PortMapClass.status.links` rather than a computed hash. A
-/31 per node pair out of the class subnet, 128 slots in the default /24. The
-endpoint-holding agent allocates the lowest free slot and writes the claim; the
-accepting agent reads it. The API server's optimistic concurrency is the arbiter:
-a 409 means re-read, redo, retry.
+Every return link in the cluster gets its numbers from one pool of 1024 slots,
+and an agent claims slot n by creating the cluster-scoped Link object named
+`slot-<n>`. Decided 2026-10-11. The slot fixes the link's VNI, its IPv4 and IPv6
+addresses, its packet mark, its routing table and its device name;
+[api.md](api.md#link) lists the numbers.
 
-The API server is already a consistent store with compare-and-swap, so this needs
-no leader, no election, and no agent-to-agent protocol. Collisions become
-impossible rather than handled, the allocation is visible in
-`kubectl get portmapclass -o yaml`, and the scheme reuses the single-writer rule
-the design already had for status. A computed hash was rejected because two
-agents computing the same slot from stale views cannot detect each other, which
-is a collision-repair protocol in disguise.
+Releases up to v0.7.1 kept each class's claims in its own
+`PortMapClass.status.links`, and each class numbered its slots from 0. Inside
+one class a claim was safe, because one status object held every claim and the
+API server's compare-and-swap ordered the writes to it. No check compared the numbers of two
+classes. A node holding links of two classes met these collisions:
+
+| Number | What the two classes produced |
+| --- | --- |
+| mark and table | slot 0 of every class used mark 0x6b700000 and table 200, so the node got two pref 102 rules for one mark and two default routes in table 200 |
+| VNI | every class left at the default asked for VNI 4242 on port 4790, and the kernel refuses a second device with the same VNI and port |
+| IPv6 link addresses | every class used the default subnet6, fd64:f5ac:e961::/112, so slot 0 of each class put the same /127 on two devices |
+| routing table | 200 + slot reached the kernel's default, main and local tables, 253 to 255, at slots 53 to 55 |
+
+The docs told the admin to give overlapping classes their own vni and subnet.
+That asked the admin to know which classes overlap, and no condition reported a
+class that got it wrong.
+
+A slot computed from a hash of the class and the node pair needs no store. Two
+pairs whose hashes land on one slot both program it, and neither agent sees the
+other's link in anything it reads. Detecting the collision and moving one pair
+would need a repair protocol between the agents.
+
+The Link objects keep the principle the per-class claim had and widen it to the
+whole cluster. The API server refuses a second create of `slot-<n>` with
+AlreadyExists, so a slot has one owner across every class, with no leader and no
+agent-to-agent protocol, and `kubectl get links` lists every allocation. We put
+the pool's ranges clear of the old class defaults: VNIs from 7000,
+169.254.64.0/21 and fd64:f5ac:e961::1:0/112.
+
+The marks and tables also have to stay clear of what the CNI and the mesh put
+on a node. Read off a worker on 2026-10-11:
+
+| Pref | Rule | Owner |
+| --- | --- | --- |
+| 9 | `fwmark 0x200/0xf00 lookup 2004` | Cilium, its L7 proxy |
+| 105 | `lookup main` | netbird |
+| 110 | `fwmark 0x1bd00 lookup 7120` | netbird |
+
+A mark of 0x6b700000 or'd with the slot sets bits under 0xf00 from slot 256 on,
+and Cilium's rule takes slots 512 to 767 to its proxy table. A table of 1000
+plus the slot reaches 2004 at slot 1004. A slot's mark therefore keeps its low
+eight bits in the low byte and moves the next two to bits 12 and 13, leaving
+0xf00 clear, and its table is 10000 plus the slot.
 
 ## Link release
 
-A claim is freed after 24h unused, and any agent the class selects may run the
-garbage collection. The link device is not held by that window: it is torn down
-immediately by being absent from the next desired state. The status entry lingers
-only to hold the address reservation.
+A Link is deleted after 24 hours unused, and any agent may release it. Every
+agent computes the needed pairs from the same inputs, so each one sets
+`status.unusedSince` on a Link no mapping needs, clears it on a Link a mapping
+needs again, and deletes a Link whose `unusedSince` is more than 24 hours old.
+An agent on a third node releases a Link whose two nodes have both left the
+cluster. The link device is not held by that window: the next desired state
+leaves it out, and the agent tears it down. The Link lingers only to hold the
+slot.
 
-Nothing carries traffic through a free window, so the GC needs no locking, and
-clock skew between nodes is irrelevant against 24h. A per-pair teardown protocol
-was rejected for the same reason the allocation uses the API server: the device
-lifecycle is already level-driven, and the reservation is the only thing that
-needs a timer.
+Each status write and delete carries the resourceVersion the pass read. When
+another agent has changed the Link since, the write is dropped, and the next
+pass decides again from the newer object.
+
+Releases up to v0.7.1 never released a claim. The agent computed `unusedSince`
+and passed it through mergeClaim, which cleared `unusedSince` on every key the
+class status already held. A Link's status is written as the pass computed it,
+with no merge step in between.
+
+Nothing carries traffic through a free window, so the release needs no locking,
+and clock skew between nodes is irrelevant against 24 hours. A per-pair teardown
+protocol was rejected for the same reason the allocation uses the API server:
+the device lifecycle is already level-driven, and the reservation is the only
+state that needs a timer.
 
 ## A vxlan link rather than GRE or a second WireGuard
 

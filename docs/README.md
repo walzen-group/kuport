@@ -23,8 +23,9 @@ Start with [overview.md](overview.md) if you have not met it before.
 **[overview.md](overview.md)** states the problem, the goals and non-goals, and
 what a cluster has to provide.
 
-**[api.md](api.md)** covers both kinds field by field, how a mapping's
-interfaces resolve against each node's, and what the two status blocks report.
+**[api.md](api.md)** covers the three kinds field by field, how a mapping's
+interfaces resolve against each node's, what the two status blocks report, the
+Link objects that number the return links, and the agent's flags.
 
 **[architecture.md](architecture.md)** is the DaemonSet with no central
 controller: how every agent computes the same answer, which one writes a given

@@ -52,11 +52,11 @@ kuport owns exactly the objects it names:
 | nftables table | `kuport`, family inet; a family ip table of that name, which older releases wrote, is deleted |
 | nftables chains | `kup-steer`, `kup-pre`, `kup-post`, `kup-mangle` |
 | nftables maps | `kup-steer4`, `kup-steer6`, present while a family is steered |
-| stand-in addresses | 169.254.76.0/24 and fd6b:7570::/96; no node holds one, and a class's link subnet stays out of the IPv4 block |
-| vxlan links | `kup-` + first 8 hex of sha256(class name and peer node name), 12 characters |
-| link addresses | the /31 and, for IPv6 delivery, the /127 on a kup- link; any other global IPv6 address on it is removed, the kernel's link-local one is kept |
-| routing tables | `200 + slot`, the slot recorded in the class status, in IPv4 and IPv6 |
-| routing rules | pref 101 loop guard (IPv4 only), pref 102 divert (IPv4 and IPv6), marks 0x6b700000 or'd with the slot |
+| stand-in addresses | 169.254.76.0/24 and fd6b:7570::/96; no node holds one, and the link pool's 169.254.64.0/21 stays clear of the IPv4 block |
+| vxlan links | `kup-<n>`, n the slot of the link's Link object, 0 to 1023 |
+| link addresses | the /31 from 169.254.64.0/21 and, for IPv6 delivery, the /127 from fd64:f5ac:e961::1:0/112 on a kup- link; any other global IPv6 address on it is removed, the kernel's link-local one is kept |
+| routing tables | 10000 + slot, 10000 to 11023, in IPv4 and IPv6 |
+| routing rules | pref 101 loop guard (IPv4 only), pref 102 divert (IPv4 and IPv6), any rule whose mark is 0x6b70xxxx; a slot's mark keeps bits 8-11 clear for Cilium (decisions.md, "Link address allocation") |
 | masquerade and mark rules | inside kuport's own chains, which are rewritten whole each pass |
 
 Every pass rewrites the whole table in one transaction. Links, rules and routes
@@ -80,7 +80,7 @@ the next start reconciles them away.
 
 | Condition | Behaviour |
 | --- | --- |
-| the link's UDP port collides with the CNI's | report `Ready=False` with `VxlanPortConflict` on the class |
+| the agent's `--link-port` equals the CNI's tunnel port, 8472 for Cilium | report `Ready=False` with `VxlanPortConflict` on every Vxlan class |
 
 The CNI's routing mode was a second refusal until v0.4.0, when both legs moved
 onto kuport's own link and the mode stopped deciding anything.
