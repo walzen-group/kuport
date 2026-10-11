@@ -518,6 +518,8 @@ the route the packets take and leaves policy to Cilium.
 - Netlink: the egress node's pref 101 and 102 rules and its table route.
 - On the cluster: a probe pod on quasar's worker with an Egress on an
   EgressClass naming bar fetches its public address from an address echo
-  service and reads bar's. TCP and UDP, IPv4 and IPv6. Then, with bar's agent
+  service and reads bar's. TCP and UDP, IPv4 and IPv6. A 1400-byte UDP
+  datagram with DF set, and its IPv6 counterpart, gets an ICMP back that names
+  1300, and the resend at 1300 crosses. Then, with bar's agent
   stopped and `failClosed: true`, the probe's fetch times out and never returns
   quasar's address; with `failClosed: false` it returns quasar's address.
