@@ -1,6 +1,8 @@
 package reconcile
 
 import (
+	"fmt"
+	"net/netip"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -120,8 +122,43 @@ func withSubnet6(cidr string) classOpt {
 	}
 }
 
-func withLinks(links ...v1alpha1.LinkAllocation) classOpt {
+// withLegacyLinks fills the deprecated status.links a class carries from a
+// release before the Link kind.
+func withLegacyLinks(links ...v1alpha1.LinkAllocation) classOpt {
 	return func(c *v1alpha1.PortMapClass) { c.Status.Links = links }
+}
+
+// linkOf builds the Link object holding slot for a class's link between two
+// nodes. Its resource version names the slot, so a test can check the
+// precondition an update or delete carries.
+func linkOf(kind, className, a, b string, slot int32) *v1alpha1.Link {
+	p := sortedPair(a, b)
+	name := fmt.Sprintf("slot-%d", slot)
+	return &v1alpha1.Link{
+		ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "rv-" + name},
+		Spec: v1alpha1.LinkSpec{
+			ClassKind: kind,
+			ClassName: className,
+			Peers:     []string{p[0], p[1]},
+		},
+	}
+}
+
+// claim is the Link for the public PortMapClass between two nodes at slot.
+func claim(a, b string, slot int32) *v1alpha1.Link {
+	return linkOf(v1alpha1.ClassKindPortMapClass, "public", a, b, slot)
+}
+
+// unusedClaim is claim with UnusedSince set.
+func unusedClaim(a, b string, slot int32, since *metav1.Time) *v1alpha1.Link {
+	l := claim(a, b, slot)
+	l.Status.UnusedSince = since
+	return l
+}
+
+func prefixPtr(s string) *netip.Prefix {
+	p := netip.MustParsePrefix(s)
+	return &p
 }
 
 func withNodeRows(rows ...v1alpha1.NodeStatus) classOpt {
@@ -261,11 +298,7 @@ func findCond(conds []metav1.Condition, condType string) metav1.Condition {
 func resolvedMappingFor(in Inputs, namespace, name string) *mapping {
 	idx := newIndex(in)
 	mappings := resolveMappings(in, idx)
-	needed := neededPairsByClass(mappings)
-	alloc := map[string]classAlloc{}
-	for _, c := range in.Classes {
-		alloc[c.Name] = allocateClass(c, needed[c.Name])
-	}
+	alloc := allocateLinks(in.Links, neededPairs(mappings))
 	resolveProgrammed(in, idx, mappings, alloc)
 	for _, m := range mappings {
 		if m.pm.Namespace == namespace && m.pm.Name == name {

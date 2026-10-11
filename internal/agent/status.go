@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -10,18 +9,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
 	kreconcile "github.com/walzen-group/kuport/internal/reconcile"
 )
 
-// staleClaimAge is how long a link claim may sit unused before any selecting
-// agent may drop it. It mirrors the window Compute uses when it proposes drops.
-const staleClaimAge = 24 * time.Hour
-
 // writeStatuses writes every piece of status this node owns: the PortMaps whose
-// endpoint it holds, and its contribution to each class it participates in. A
-// write failure on one object does not abandon the rest.
+// endpoint it holds, its contribution to each class it accepts for, and its
+// writes to the Link pool. A write failure on one object does not abandon the
+// rest.
 func (r *Reconciler) writeStatuses(ctx context.Context, res kreconcile.Result, hs hostState) error {
 	var firstErr error
 	for key, st := range res.PortMapStatus {
@@ -32,6 +29,64 @@ func (r *Reconciler) writeStatuses(ctx context.Context, res kreconcile.Result, h
 	for name, contrib := range res.ClassStatus {
 		if err := r.writeClass(ctx, name, contrib, hs); err != nil && firstErr == nil {
 			firstErr = err
+		}
+	}
+	if err := r.writeLinks(ctx, res.Links); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// writeLinks makes this node's writes to the Link pool. Each one is the whole
+// decision for its object, computed against the version this pass read:
+//
+//   - A create that finds the name taken returns AlreadyExists. Another agent
+//     claimed the slot first, and the watch brings its Link into the next pass,
+//     which picks another slot.
+//   - A status update and a delete carry the version Compute saw. When the
+//     object has moved on, the write conflicts and is dropped; the watch
+//     delivers the newer object and the next pass decides again.
+//
+// Nothing here merges a computed value into a fresher object, so a decision is
+// written as Compute made it or not at all.
+func (r *Reconciler) writeLinks(ctx context.Context, acts kreconcile.LinkActions) error {
+	var firstErr error
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	for i := range acts.Create {
+		l := acts.Create[i].DeepCopy()
+		if err := r.Client.Create(ctx, l); err != nil && !kerrors.IsAlreadyExists(err) {
+			keep(err)
+		}
+	}
+
+	for _, u := range acts.Status {
+		var l v1alpha1.Link
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: u.Name}, &l); err != nil {
+			if !kerrors.IsNotFound(err) {
+				keep(err)
+			}
+			continue
+		}
+		if l.ResourceVersion != u.ResourceVersion {
+			continue
+		}
+		l.Status.UnusedSince = u.UnusedSince
+		if err := r.Client.Status().Update(ctx, &l); err != nil && !kerrors.IsConflict(err) && !kerrors.IsNotFound(err) {
+			keep(err)
+		}
+	}
+
+	for _, d := range acts.Delete {
+		rv := d.ResourceVersion
+		l := &v1alpha1.Link{ObjectMeta: metav1.ObjectMeta{Name: d.Name}}
+		err := r.Client.Delete(ctx, l, client.Preconditions{ResourceVersion: &rv})
+		if err != nil && !kerrors.IsConflict(err) && !kerrors.IsNotFound(err) {
+			keep(err)
 		}
 	}
 	return firstErr
@@ -131,12 +186,9 @@ func (r *Reconciler) fillPublished(ctx context.Context, className string, rows [
 
 // writeClass writes this node's contribution to one class under the same
 // optimistic-concurrency discipline as writePortMap: re-read fresh, recompute
-// from the fresh object, write only the entries this node owns.
-//
-// The claim, drop and condition merges all act on the freshly read Links and
-// Conditions, so two agents touching different rows never clobber each other,
-// and a slot another agent has already taken is left alone rather than
-// overwritten.
+// from the fresh object, write only the entries this node owns. The row and
+// condition merges act on the freshly read object, so two agents touching
+// different rows never clobber each other.
 func (r *Reconciler) writeClass(ctx context.Context, name string, contrib kreconcile.ClassContribution, hs hostState) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var class v1alpha1.PortMapClass
@@ -160,11 +212,8 @@ func (r *Reconciler) writeClass(ctx context.Context, name string, contrib krecon
 			upsertNodeRow(&next.Status.Nodes, row)
 		}
 
-		for _, claim := range contrib.ClaimLinks {
-			mergeClaim(&next.Status.Links, claim)
-		}
-		for _, key := range contrib.DropLinks {
-			dropStaleClaim(&next.Status.Links, key, r.now())
+		if contrib.ClearLegacyLinks {
+			next.Status.Links = nil
 		}
 
 		for _, c := range overlayConditions(contrib.Conditions, &class, hs, r.now()) {
@@ -192,53 +241,6 @@ func upsertNodeRow(rows *[]v1alpha1.NodeStatus, row v1alpha1.NodeStatus) {
 	*rows = append(*rows, row)
 }
 
-// mergeClaim records a link claim without ever clobbering another agent's. A
-// claim whose key already exists is left in place, its UnusedSince cleared
-// because the pair is needed again. A claim for a new key whose slot a different
-// key already holds is dropped this pass rather than overwritten: the claim was
-// computed against a status this write has since found stale, and the next
-// level-driven reconcile recomputes it against the fresh allocation.
-func mergeClaim(links *[]v1alpha1.LinkAllocation, claim v1alpha1.LinkAllocation) {
-	for i := range *links {
-		if (*links)[i].Key == claim.Key {
-			if (*links)[i].UnusedSince != nil {
-				(*links)[i].UnusedSince = nil
-			}
-			// The slot is the claim's identity and never moves, so it is not
-			// adopted from a proposal. The subnet is text derived from the
-			// class subnet and that slot, so a correction computed against the
-			// current class is taken here. Without it the recorded /31 goes on
-			// naming an address the link stopped carrying the moment an admin
-			// changed the class subnet.
-			if claim.Subnet != "" && (*links)[i].Slot == claim.Slot {
-				(*links)[i].Subnet = claim.Subnet
-			}
-			return
-		}
-	}
-	for i := range *links {
-		if (*links)[i].Slot == claim.Slot {
-			return // slot taken by another pair; recompute next pass.
-		}
-	}
-	*links = append(*links, claim)
-}
-
-// dropStaleClaim removes a claim only if, in the freshly read object, it is
-// still unused for more than 24h. Compute proposed the drop against a possibly
-// stale status; re-checking here keeps a lost race harmless.
-func dropStaleClaim(links *[]v1alpha1.LinkAllocation, key string, now metav1.Time) {
-	out := (*links)[:0]
-	for _, la := range *links {
-		stale := la.Key == key && la.UnusedSince != nil &&
-			now.Sub(la.UnusedSince.Time) > staleClaimAge
-		if !stale {
-			out = append(out, la)
-		}
-	}
-	*links = out
-}
-
 // overlayConditions layers the host-only class conditions over the ones Compute
 // produced. Compute cannot read the CNI's mode or the underlay, so the tunnel
 // and port-collision refusals are decided here and take precedence over the
@@ -253,14 +255,11 @@ func overlayConditions(base []metav1.Condition, class *v1alpha1.PortMapClass, hs
 	// rode the CNI's tunnel and native routing dropped it. Since v0.4.0 both
 	// legs ride kuport's own return link, so the mode no longer matters. What
 	// still does is the port: two VXLAN devices cannot share a VNI and port.
-	var reason, msg string
-	switch {
-	case classVxlanPort(class) == hs.cniPort:
-		reason = v1alpha1.ReasonVxlanPortConflict
-		msg = "return-path VXLAN port collides with the CNI's tunnel port"
-	default:
+	if hs.linkPort != hs.cniPort {
 		return base
 	}
+	reason := v1alpha1.ReasonVxlanPortConflict
+	msg := "the agent's --link-port collides with the CNI's tunnel port"
 
 	out := make([]metav1.Condition, 0, len(base)+1)
 	for _, c := range base {
@@ -277,13 +276,4 @@ func overlayConditions(base []metav1.Condition, class *v1alpha1.PortMapClass, hs
 		ObservedGeneration: class.Generation,
 	})
 	return out
-}
-
-// classVxlanPort is the return-path VXLAN port a class asks for, defaulting to
-// 4790 when the vxlan block leaves it unset.
-func classVxlanPort(class *v1alpha1.PortMapClass) int {
-	if v := class.Spec.ReturnPath.Vxlan; v != nil && v.Port != 0 {
-		return int(v.Port)
-	}
-	return 4790
 }

@@ -15,21 +15,9 @@ import (
 	"github.com/walzen-group/kuport/internal/datapath"
 )
 
-// claim is a shorthand for an existing LinkAllocation in a class's status.
-func claim(a, b string, slot int32) v1alpha1.LinkAllocation {
-	p := sortedPair(a, b)
-	return v1alpha1.LinkAllocation{
-		Key:    pairKey(a, b),
-		Peers:  []string{p[0], p[1]},
-		Subnet: "169.254.77.0/31",
-		Slot:   slot,
-	}
-}
-
 // remoteWorld is node-a (accepting) plus a pod on node-b, with an existing
-// return-link claim so both ends can build their link at a known slot.
+// Link so both ends can build their link at a known slot.
 func remoteWorld(runOn string, opts ...classOpt) Inputs {
-	allOpts := append([]classOpt{withLinks(claim("node-a", "node-b", 0))}, opts...)
 	return Inputs{
 		NodeName: runOn,
 		Nodes: []*corev1.Node{
@@ -38,12 +26,13 @@ func remoteWorld(runOn string, opts ...classOpt) Inputs {
 			node("node-c", "10.0.0.3", nil),
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
-		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, allOpts...)},
+		Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"}, opts...)},
 		PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
 		},
-		Now: metav1.NewTime(baseTime),
+		Links: []*v1alpha1.Link{claim("node-a", "node-b", 0)},
+		Now:   metav1.NewTime(baseTime),
 	}
 }
 
@@ -131,13 +120,13 @@ func TestRefusals(t *testing.T) {
 					node("node-c", "10.0.0.3", nil),
 				},
 				Namespaces: []*corev1.Namespace{ns("games", nil)},
-				Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
-					withLinks(claim("node-a", "node-c", 0)))},
-				PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
+				Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"})},
+				PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 				Slices: []*discoveryv1.EndpointSlice{
 					slice("games", "a", endpointSpec{addr: "10.244.9.9", node: "node-c", target: "pod-a"}),
 				},
-				Now: metav1.NewTime(baseTime),
+				Links: []*v1alpha1.Link{claim("node-a", "node-c", 0)},
+				Now:   metav1.NewTime(baseTime),
 			}
 		}
 		// The deterministic choice picks no candidate on an accepting node
@@ -192,13 +181,13 @@ func TestAgentAgreement(t *testing.T) {
 				node("node-c", "10.0.0.3", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
-				withLinks(claim("node-a", "node-b", 5)))},
-			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
+			Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"})},
+			PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
 			},
-			Now: metav1.NewTime(baseTime),
+			Links: []*v1alpha1.Link{claim("node-a", "node-b", 5)},
+			Now:   metav1.NewTime(baseTime),
 		}
 	}
 
@@ -272,7 +261,6 @@ func multiAcceptingWorld(runOn string) Inputs {
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
 		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
-			withLinks(claim("node-a", "node-b", 0)),
 			withNodeRows(
 				v1alpha1.NodeStatus{Name: "node-a", Ready: true},
 				v1alpha1.NodeStatus{Name: "node-b", Ready: false, Message: "interface eth1 not present"},
@@ -284,7 +272,8 @@ func multiAcceptingWorld(runOn string) Inputs {
 				endpointSpec{addr: "10.244.8.8", node: "node-b", target: "pod-alpha"},
 			),
 		},
-		Now: metav1.NewTime(baseTime),
+		Links: []*v1alpha1.Link{claim("node-a", "node-b", 0)},
+		Now:   metav1.NewTime(baseTime),
 	}
 }
 
@@ -374,13 +363,13 @@ func TestServingNodeIsChosenPodsNode(t *testing.T) {
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
 			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
-				withLinks(claim("node-a", "node-b", 0)),
 				withNodeRows(v1alpha1.NodeStatus{Name: "node-b", Ready: true}))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.8.8", node: "node-b", target: "pod-alpha"}),
 			},
-			Now: metav1.NewTime(baseTime),
+			Links: []*v1alpha1.Link{claim("node-a", "node-b", 0)},
+			Now:   metav1.NewTime(baseTime),
 		}
 	}
 
@@ -414,7 +403,7 @@ func TestServingNodeIsChosenPodsNode(t *testing.T) {
 // it reads True/AllNodesReady while the sibling node-b reports no row and
 // gates nothing.
 func TestMultiAcceptRemotePodWindow(t *testing.T) {
-	world := func(runOn string, links ...v1alpha1.LinkAllocation) Inputs {
+	world := func(runOn string, links ...*v1alpha1.Link) Inputs {
 		return Inputs{
 			NodeName: runOn,
 			Nodes: []*corev1.Node{
@@ -424,14 +413,14 @@ func TestMultiAcceptRemotePodWindow(t *testing.T) {
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
 			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a", "node-b"},
-				withLinks(links...),
 				// Only the participant S reports a row; the sibling is absent.
 				withNodeRows(v1alpha1.NodeStatus{Name: "node-a", Ready: true}))},
 			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.9.9", node: "node-c", target: "pod-a"}),
 			},
-			Now: metav1.NewTime(baseTime),
+			Links: links,
+			Now:   metav1.NewTime(baseTime),
 		}
 	}
 
@@ -443,8 +432,7 @@ func TestMultiAcceptRemotePodWindow(t *testing.T) {
 	})
 
 	t.Run("landed claim", func(t *testing.T) {
-		links := []v1alpha1.LinkAllocation{claim("node-a", "node-c", 0)}
-		res := Compute(world("node-a", links...))
+		res := Compute(world("node-a", claim("node-a", "node-c", 0)))
 		c := programmedOf(res, "games", "a")
 		if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonAllNodesReady {
 			t.Errorf("after landing Programmed = %s/%s, want True/AllNodesReady", c.Status, c.Reason)
@@ -458,7 +446,7 @@ func TestMultiAcceptRemotePodWindow(t *testing.T) {
 // windowWorld is a single accepting node (node-a) with the pod on node-b.
 // node-a reports a ready class row, so the only thing that can hold the
 // mapping back from Programmed is the return-path slot.
-func windowWorld(runOn string, links ...v1alpha1.LinkAllocation) Inputs {
+func windowWorld(runOn string, links ...*v1alpha1.Link) Inputs {
 	return Inputs{
 		NodeName: runOn,
 		Nodes: []*corev1.Node{
@@ -467,13 +455,13 @@ func windowWorld(runOn string, links ...v1alpha1.LinkAllocation) Inputs {
 		},
 		Namespaces: []*corev1.Namespace{ns("games", nil)},
 		Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
-			withLinks(links...),
 			withNodeRows(v1alpha1.NodeStatus{Name: "node-a", Ready: true}))},
 		PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
 		},
-		Now: metav1.NewTime(baseTime),
+		Links: links,
+		Now:   metav1.NewTime(baseTime),
 	}
 }
 
@@ -497,7 +485,7 @@ func TestClaimWindowReportsHonest(t *testing.T) {
 	})
 
 	t.Run("landed claim", func(t *testing.T) {
-		links := []v1alpha1.LinkAllocation{claim("node-a", "node-b", 0)}
+		links := []*v1alpha1.Link{claim("node-a", "node-b", 0)}
 		holder := Compute(windowWorld("node-b", links...))
 		if len(holder.State.Mark) != 1 || holder.State.Mark[0].Mark != markBase {
 			t.Errorf("holder Mark = %+v, want one rule at slot 0", holder.State.Mark)
@@ -534,8 +522,8 @@ func assertCounts(t *testing.T, st datapath.State, want counts) {
 }
 
 // richWorld is a fixture that exercises every output path: co-located and remote
-// mappings, a conflict, a missing class, a live claim, a claim to garbage
-// collect and one to drop, across two classes. Computed from node-a.
+// mappings, a conflict, a missing class, a live Link, a Link to mark unused and
+// one to delete, across two classes. Computed from node-a.
 func richWorld() Inputs {
 	oldUnused := metav1.NewTime(baseTime.Add(-48 * time.Hour)) // 48h before now
 	return Inputs{
@@ -551,14 +539,7 @@ func richWorld() Inputs {
 			ns("infra", map[string]string{"public": "yes"}),
 		},
 		Classes: []*v1alpha1.PortMapClass{
-			class("public", []string{"node-a"},
-				withInterfaces("eth0", "eth1"),
-				withLinks(
-					claim("node-a", "node-c", 0),                   // needed by web -> node-c
-					claim("node-a", "node-d", 1),                   // not needed -> set UnusedSince
-					unusedClaim("node-b", "node-d", 2, &oldUnused), // stale -> drop
-				),
-			),
+			class("public", []string{"node-a"}, withInterfaces("eth0", "eth1")),
 			class("internal", []string{"node-e"}),
 		},
 		PortMaps: []*v1alpha1.PortMap{
@@ -575,15 +556,13 @@ func richWorld() Inputs {
 			slice("games", "conflict-a", endpointSpec{addr: "10.244.0.8", node: "node-a", target: "pod-ca"}),
 			slice("infra", "cache", endpointSpec{addr: "10.244.1.4", node: "node-b", target: "pod-cache"}),
 		},
+		Links: []*v1alpha1.Link{
+			claim("node-a", "node-c", 0),                   // needed by web -> node-c
+			claim("node-a", "node-d", 1),                   // not needed -> set UnusedSince
+			unusedClaim("node-b", "node-d", 2, &oldUnused), // stale -> delete
+		},
 		Now: metav1.NewTime(baseTime),
 	}
-}
-
-// unusedClaim is a claim carrying an UnusedSince timestamp.
-func unusedClaim(a, b string, slot int32, since *metav1.Time) v1alpha1.LinkAllocation {
-	c := claim(a, b, slot)
-	c.UnusedSince = since
-	return c
 }
 
 // cloneInputs copies the top-level slices so a shuffle never reorders the base.
@@ -595,6 +574,7 @@ func cloneInputs(in Inputs) Inputs {
 	out.Classes = append([]*v1alpha1.PortMapClass(nil), in.Classes...)
 	out.PortMaps = append([]*v1alpha1.PortMap(nil), in.PortMaps...)
 	out.Slices = append([]*discoveryv1.EndpointSlice(nil), in.Slices...)
+	out.Links = append([]*v1alpha1.Link(nil), in.Links...)
 	return out
 }
 
@@ -605,6 +585,7 @@ func shuffleInputs(in Inputs, rng *rand.Rand) Inputs {
 	rng.Shuffle(len(in.Classes), func(i, j int) { in.Classes[i], in.Classes[j] = in.Classes[j], in.Classes[i] })
 	rng.Shuffle(len(in.PortMaps), func(i, j int) { in.PortMaps[i], in.PortMaps[j] = in.PortMaps[j], in.PortMaps[i] })
 	rng.Shuffle(len(in.Slices), func(i, j int) { in.Slices[i], in.Slices[j] = in.Slices[j], in.Slices[i] })
+	rng.Shuffle(len(in.Links), func(i, j int) { in.Links[i], in.Links[j] = in.Links[j], in.Links[i] })
 	return in
 }
 
@@ -614,7 +595,6 @@ func shuffleInputs(in Inputs, rng *rand.Rand) Inputs {
 func multiWorld(runOn string, opts ...classOpt) Inputs {
 	all := append([]classOpt{
 		withMultiServing(),
-		withLinks(claim("node-a", "node-c", 0), claim("node-b", "node-c", 1)),
 		withNodeRows(
 			v1alpha1.NodeStatus{Name: "node-a", Ready: true},
 			v1alpha1.NodeStatus{Name: "node-b", Ready: true},
@@ -634,7 +614,8 @@ func multiWorld(runOn string, opts ...classOpt) Inputs {
 		Slices: []*discoveryv1.EndpointSlice{
 			slice("games", "a", endpointSpec{addr: "10.244.9.9", node: "node-c", target: "pod-a"}),
 		},
-		Now: metav1.NewTime(baseTime),
+		Links: []*v1alpha1.Link{claim("node-a", "node-c", 0), claim("node-b", "node-c", 1)},
+		Now:   metav1.NewTime(baseTime),
 	}
 }
 

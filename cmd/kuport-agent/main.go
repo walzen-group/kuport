@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -50,6 +51,7 @@ type config struct {
 	logLevel    string
 	resync      time.Duration
 	healthAddr  string
+	linkPort    uint16
 	showVersion bool
 }
 
@@ -62,6 +64,8 @@ func parseFlags(args []string, getenv func(string) string) config {
 	logLevel := fs.String("log-level", envOr(getenv, "LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	resync := fs.Duration("resync", durOr(getenv, "RESYNC", 5*time.Minute), "informer resync period, the level-driven safety net")
 	healthAddr := fs.String("health-addr", envOr(getenv, "HEALTH_ADDR", ":8081"), "address the health and readiness probes bind to")
+	linkPort := fs.Uint("link-port", uintOr(getenv, "LINK_PORT", 4790),
+		"UDP port of every return link; must differ from the CNI's tunnel port, 8472 for Cilium")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	_ = fs.Parse(args)
 
@@ -70,8 +74,20 @@ func parseFlags(args []string, getenv func(string) string) config {
 		logLevel:    *logLevel,
 		resync:      *resync,
 		healthAddr:  *healthAddr,
+		linkPort:    uint16(*linkPort),
 		showVersion: *showVersion,
 	}
+}
+
+// uintOr parses a port from the environment, falling back to def when unset,
+// unparseable or outside 1-65535.
+func uintOr(getenv func(string) string, key string, def uint) uint {
+	if v := getenv(key); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 16); err == nil && n > 0 {
+			return uint(n)
+		}
+	}
+	return def
 }
 
 // envOr returns the env value when set, else the default.
@@ -136,6 +152,7 @@ func run(cfg config) error {
 		NodeName: cfg.nodeName,
 		DP:       dp,
 		Host:     agent.NewHost(mgr.GetAPIReader(), handles.NL),
+		LinkPort: cfg.linkPort,
 		Log:      log.WithName("reconciler"),
 	}
 	if err := r.SetupWithManager(mgr); err != nil {

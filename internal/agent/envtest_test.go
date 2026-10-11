@@ -12,11 +12,11 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -73,7 +73,7 @@ func TestEnvtestClassStatus(t *testing.T) {
 	// false here and no longer changes the verdict.
 	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{}}
 	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{Name: "a", Ready: true}}
-	hs := hostState{tunnelKnown: true, tunnelOK: false, cniPort: 4790, underlayMTU: 1350, linkMTU: 1300}
+	hs := hostState{tunnelKnown: true, tunnelOK: false, cniPort: 4790, linkPort: 4790, underlayMTU: 1350, linkMTU: 1300}
 	if err := r.writeClass(ctx, "public", contrib, hs); err != nil {
 		t.Fatalf("writeClass: %v", err)
 	}
@@ -91,59 +91,54 @@ func TestEnvtestClassStatus(t *testing.T) {
 	}
 }
 
-// TestEnvtestSubnet6 proves the subnet6 schema on a real API server: a vxlan
-// block that leaves it out gets the default, a prefix that is not IPv6 is
-// refused, and so is one holding fewer /127s than subnet holds /31s, since the
-// two are indexed by the same slot.
-func TestEnvtestSubnet6(t *testing.T) {
+// TestEnvtestLinkPool proves on a real API server what the pool rests on: a
+// second create of a slot's name is refused whichever class asks, a Link's spec
+// cannot change, and a deprecated vxlan block is stored as written with no
+// defaults filled in.
+func TestEnvtestLinkPool(t *testing.T) {
 	c, stop := startEnv(t)
 	defer stop()
 	ctx := context.Background()
 
-	classWith := func(name string, vx v1alpha1.VxlanConfig) *v1alpha1.PortMapClass {
-		return &v1alpha1.PortMapClass{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: v1alpha1.PortMapClassSpec{
-				Nodes:      map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: []string{"eth0"}}},
-				ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan, Vxlan: &vx},
-			},
+	link := func(className string, peers ...string) *v1alpha1.Link {
+		return &v1alpha1.Link{
+			ObjectMeta: metav1.ObjectMeta{Name: "slot-3"},
+			Spec:       v1alpha1.LinkSpec{ClassKind: v1alpha1.ClassKindPortMapClass, ClassName: className, Peers: peers},
 		}
 	}
-
-	if err := c.Create(ctx, classWith("defaulted", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24"})); err != nil {
-		t.Fatalf("create class without subnet6: %v", err)
+	if err := c.Create(ctx, link("public", "a", "b")); err != nil {
+		t.Fatalf("create slot-3: %v", err)
 	}
-	var got v1alpha1.PortMapClass
-	if err := c.Get(ctx, types.NamespacedName{Name: "defaulted"}, &got); err != nil {
+	if err := c.Create(ctx, link("private", "a", "c")); !kerrors.IsAlreadyExists(err) {
+		t.Errorf("second create of slot-3 = %v, want AlreadyExists", err)
+	}
+
+	var got v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-3"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if s := got.Spec.ReturnPath.Vxlan.Subnet6; s != "fd64:f5ac:e961::/112" {
-		t.Errorf("subnet6 = %q, want the default fd64:f5ac:e961::/112", s)
+	got.Spec.Peers = []string{"a", "z"}
+	if err := c.Update(ctx, &got); err == nil {
+		t.Error("changing a Link's peers was accepted, want the spec immutable")
 	}
 
-	tests := []struct {
-		name    string
-		vx      v1alpha1.VxlanConfig
-		refused bool
-	}{
-		{"ipv4 prefix", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "10.99.0.0/16"}, true},
-		{"not a prefix", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64::1"}, true},
-		// A /24 holds 128 /31s; a /121 holds 64 /127s.
-		{"fewer slots", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64:f5ac:e961::/121"}, true},
-		// A /120 holds 128 /127s, exactly enough.
-		{"as many slots", v1alpha1.VxlanConfig{Subnet: "169.254.77.0/24", Subnet6: "fd64:f5ac:e961::/120"}, false},
-		{"more slots", v1alpha1.VxlanConfig{Subnet: "169.254.79.0/24", Subnet6: "fd64:f5ac:e961::/64"}, false},
+	cls := &v1alpha1.PortMapClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy"},
+		Spec: v1alpha1.PortMapClassSpec{
+			Nodes: map[string]v1alpha1.NodeInterfaces{"a": {Interfaces: []string{"eth0"}}},
+			ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan,
+				Vxlan: &v1alpha1.VxlanConfig{Subnet: "169.254.78.0/24"}},
+		},
 	}
-	for i, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := c.Create(ctx, classWith(fmt.Sprintf("case-%d", i), tt.vx))
-			if tt.refused && err == nil {
-				t.Errorf("subnet %s with subnet6 %s was accepted, want it refused", tt.vx.Subnet, tt.vx.Subnet6)
-			}
-			if !tt.refused && err != nil {
-				t.Errorf("subnet %s with subnet6 %s was refused: %v", tt.vx.Subnet, tt.vx.Subnet6, err)
-			}
-		})
+	if err := c.Create(ctx, cls); err != nil {
+		t.Fatalf("create class with a deprecated vxlan block: %v", err)
+	}
+	var stored v1alpha1.PortMapClass
+	if err := c.Get(ctx, types.NamespacedName{Name: "legacy"}, &stored); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if v := stored.Spec.ReturnPath.Vxlan; v.Subnet6 != "" || v.Port != 0 || v.VNI != 0 {
+		t.Errorf("vxlan = %+v, want only the subnet written and no defaults filled in", *v)
 	}
 }
 

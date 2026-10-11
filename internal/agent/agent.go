@@ -85,6 +85,10 @@ type Reconciler struct {
 	DP       Datapath
 	Host     Host
 
+	// LinkPort is the UDP port every return link uses, the --link-port flag.
+	// 0 means 4790.
+	LinkPort uint16
+
 	// Now injects the timestamp Compute stamps on conditions; defaults to
 	// metav1.Now. Held here so tests pin it.
 	Now func() metav1.Time
@@ -117,7 +121,7 @@ func (r *Reconciler) now() metav1.Time {
 	return metav1.Now()
 }
 
-// SetupWithManager wires the five watches to the single whole-node request key.
+// SetupWithManager wires the six watches to the single whole-node request key.
 // Node stays cluster-wide: host checks read only this node from the cache, but
 // class selection needs every node's labels and InternalIP, so the informer is
 // not filtered.
@@ -131,6 +135,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("kuport-agent").
 		Watches(&v1alpha1.PortMapClass{}, toNode).
 		Watches(&v1alpha1.PortMap{}, toNode).
+		Watches(&v1alpha1.Link{}, toNode).
 		Watches(&discoveryv1.EndpointSlice{}, toNode).
 		Watches(&corev1.Node{}, toNode).
 		Watches(&corev1.Namespace{}, toNode).
@@ -185,7 +190,7 @@ func (r *Reconciler) applyState(ctx context.Context, st datapath.State) error {
 // zero rather than failing the whole reconcile: a mapping's rules are already
 // applied, and a missing MTU or unreadable CNI config should not stop status.
 func (r *Reconciler) hostState(ctx context.Context, in kreconcile.Inputs) hostState {
-	hs := hostState{cniPort: r.Host.CNITunnelPort()}
+	hs := hostState{cniPort: r.Host.CNITunnelPort(), linkPort: int(r.linkPort())}
 
 	ok, known, err := r.Host.TunnelMode(ctx)
 	switch {
@@ -213,8 +218,17 @@ type hostState struct {
 	tunnelOK    bool
 	tunnelKnown bool
 	cniPort     int
+	linkPort    int
 	underlayMTU int
 	linkMTU     int
+}
+
+// linkPort is the configured link port, or the default 4790.
+func (r *Reconciler) linkPort() uint16 {
+	if r.LinkPort != 0 {
+		return r.LinkPort
+	}
+	return 4790
 }
 
 // internalIPOf returns the InternalIP of a named node from the input set.

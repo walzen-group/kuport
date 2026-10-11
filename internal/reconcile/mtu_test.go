@@ -1,7 +1,6 @@
 package reconcile
 
 import (
-	"net/netip"
 	"testing"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
@@ -13,7 +12,6 @@ import (
 // the device keeps the kernel default until a later pass corrects it.
 func TestBuildLinkParamsMTU(t *testing.T) {
 	const a, b = "node-a", "node-b"
-	subnet := classAlloc{subnet: netip.MustParsePrefix("169.254.77.0/24")}
 	idx := &index{nodeAddr: map[string]string{a: "10.0.0.1", b: "10.0.0.2"}}
 
 	row := func(name string, underlay int32) v1alpha1.NodeStatus {
@@ -35,7 +33,7 @@ func TestBuildLinkParamsMTU(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cls := class("c", []string{a, b}, withNodeRows(c.rows...))
-			lp, ok := buildLinkParams(idx, cls, subnet, a, b, 0)
+			lp, ok := buildLinkParams(idx, classUnderlay(cls), a, b, 0, defaultLinkPort)
 			if !ok {
 				t.Fatal("buildLinkParams returned false")
 			}
@@ -52,18 +50,17 @@ func TestBuildLinkParamsMTU(t *testing.T) {
 // carry.
 func TestBuildLinkParamsMTUAgreesOnBothEnds(t *testing.T) {
 	const a, b = "node-a", "node-b"
-	subnet := classAlloc{subnet: netip.MustParsePrefix("169.254.77.0/24")}
 	idx := &index{nodeAddr: map[string]string{a: "10.0.0.1", b: "10.0.0.2"}}
 	cls := class("c", []string{a, b}, withNodeRows(
 		v1alpha1.NodeStatus{Name: a, Ready: true, UnderlayMTU: 1350},
 		v1alpha1.NodeStatus{Name: b, Ready: true, UnderlayMTU: 1280},
 	))
 
-	fromA, ok := buildLinkParams(idx, cls, subnet, a, b, 0)
+	fromA, ok := buildLinkParams(idx, classUnderlay(cls), a, b, 0, defaultLinkPort)
 	if !ok {
 		t.Fatal("buildLinkParams from node-a returned false")
 	}
-	fromB, ok := buildLinkParams(idx, cls, subnet, b, a, 0)
+	fromB, ok := buildLinkParams(idx, classUnderlay(cls), b, a, 0, defaultLinkPort)
 	if !ok {
 		t.Fatal("buildLinkParams from node-b returned false")
 	}

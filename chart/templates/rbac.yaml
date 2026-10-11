@@ -24,6 +24,14 @@ rules:
   - apiGroups: ["kuport.wlz.li"]
     resources: ["portmaps/status"]
     verbs: ["update"]
+  # Links are the cluster-wide pool of return-link slots. The agent holding a
+  # pair's pod creates its Link, and any agent releases an unused one.
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["links"]
+    verbs: ["list", "watch", "create", "delete"]
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["links/status"]
+    verbs: ["update"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "watch"]

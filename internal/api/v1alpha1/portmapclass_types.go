@@ -98,31 +98,25 @@ type ReturnPath struct {
 	Vxlan *VxlanConfig `json:"vxlan,omitempty"`
 }
 
-// VxlanConfig sets the parameters of the VXLAN return links this class builds.
-// A slot indexes a /31 of subnet and a /127 of subnet6 alike, so subnet6 must
-// hold at least as many /127s as subnet holds /31s: 127 minus its prefix
-// length at least 31 minus subnet's.
-//
-// +kubebuilder:validation:XValidation:rule="!has(self.subnet6) || (isCIDR(self.subnet6) && cidr(self.subnet6).ip().family() == 6)",message="subnet6 must be an IPv6 prefix"
-// +kubebuilder:validation:XValidation:rule="!has(self.subnet6) || !has(self.subnet) || !isCIDR(self.subnet6) || !isCIDR(self.subnet) || cidr(self.subnet6).prefixLength() - cidr(self.subnet).prefixLength() <= 96",message="subnet6 must hold at least as many /127s as subnet holds /31s"
+// VxlanConfig is deprecated and ignored. Every return link takes its VNI and
+// addresses from its Link object's slot in the cluster-wide pool, and its UDP
+// port from the agent's --link-port. A class that sets a field here reports a
+// Deprecated condition naming it. The fields stay for one release so an
+// existing manifest still validates.
 type VxlanConfig struct {
-	// +kubebuilder:default=4242
+	// Ignored. A link's VNI follows its Link object's slot.
 	// +optional
 	VNI int32 `json:"vni,omitempty"`
 
-	// Must differ from the CNI's, which is 8472 for Cilium.
-	// +kubebuilder:default=4790
+	// Ignored. The agent's --link-port sets the port of every link.
 	// +optional
 	Port int32 `json:"port,omitempty"`
 
-	// Link addresses are allocated from here, a /31 per node pair.
-	// +kubebuilder:default="169.254.77.0/24"
+	// Ignored. A link's IPv4 ends follow its Link object's slot.
 	// +optional
 	Subnet string `json:"subnet,omitempty"`
 
-	// IPv6 link addresses are allocated from here, a /127 per node pair, at the
-	// same slot as the pair's /31.
-	// +kubebuilder:default="fd64:f5ac:e961::/112"
+	// Ignored. A link's IPv6 ends follow its Link object's slot.
 	// +optional
 	Subnet6 string `json:"subnet6,omitempty"`
 }
@@ -130,7 +124,8 @@ type VxlanConfig struct {
 // PortMapClassStatus records what each node's agent has done for this class and
 // the return links allocated between node pairs.
 type PortMapClassStatus struct {
-	// One entry per node pair that has, or recently had, a return link.
+	// No longer written: link claims are Link objects now. The class's
+	// accepting agents remove this field on their first pass.
 	// +optional
 	// +listType=map
 	// +listMapKey=key
@@ -151,9 +146,9 @@ type PortMapClassStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// LinkAllocation is the recorded-claim allocation for one node pair's return
-// link, written by the agent holding a mapping's endpoint and read by the
-// accepting node's agent.
+// LinkAllocation is a link claim as releases before the Link kind recorded it in
+// the class status, kept so the old field still decodes until the agents have
+// removed it.
 type LinkAllocation struct {
 	// The two node names joined by a slash, sorted. The list map key.
 	// +kubebuilder:validation:Required

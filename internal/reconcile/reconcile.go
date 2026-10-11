@@ -41,6 +41,13 @@ type Inputs struct {
 	Slices     []*discoveryv1.EndpointSlice
 	Now        metav1.Time
 
+	// Links is the cluster-wide pool of return-link claims.
+	Links []*v1alpha1.Link
+
+	// LinkPort is the UDP port every return link uses, the agent's
+	// --link-port. 0 means the default, 4790.
+	LinkPort uint16
+
 	// InterfaceAddrs resolves interface names to this node's IPv4 addresses,
 	// read from the host by the agent through its Host seam. An interface
 	// absent from the map is missing or unaddressed here: Compute reports
@@ -78,18 +85,22 @@ type Result struct {
 	PortMapStatus map[types.NamespacedName]v1alpha1.PortMapStatus
 
 	// ClassStatus is the per-class status this node contributes, keyed by class
-	// name: its own Nodes row, and any Links entries it claims or releases.
+	// name: its own Nodes row and the class conditions.
 	ClassStatus map[string]ClassContribution
+
+	// Links are this node's writes to the Link pool: the Links it creates as
+	// a pair's holder, and the UnusedSince updates and deletes any agent makes.
+	Links LinkActions
 }
 
-// ClassContribution is one node's contribution to a class's status. The Node
-// row is always present for a class this node participates in; the link fields
-// carry the recorded-claim allocation and its garbage collection.
+// ClassContribution is one accepting node's contribution to a class's status.
 type ClassContribution struct {
 	Node       v1alpha1.NodeStatus
-	ClaimLinks []v1alpha1.LinkAllocation // to add or update
-	DropLinks  []string                  // Key values to remove
 	Conditions []metav1.Condition
+
+	// ClearLegacyLinks removes the deprecated status.links a release before
+	// the Link kind wrote.
+	ClearLegacyLinks bool
 }
 
 // mapping is the fully-resolved decision for one PortMap: the outcome of
@@ -187,13 +198,9 @@ func Compute(in Inputs) Result {
 	// endpoint choice and roles. conflicts.go owns the ordering.
 	mappings := resolveMappings(in, idx)
 
-	// Settle the return-link slot allocation per class, so State and status
-	// agree on which slot every needed pair uses. links.go owns the arithmetic.
-	needed := neededPairsByClass(mappings)
-	alloc := map[string]classAlloc{}
-	for _, c := range in.Classes {
-		alloc[c.Name] = allocateClass(c, needed[c.Name])
-	}
+	// Settle every needed pair's slot in the cluster-wide pool, so State and
+	// status agree on which slot each link uses. links.go owns the arithmetic.
+	alloc := allocateLinks(in.Links, neededPairs(mappings))
 
 	// The served mappings deferred their Programmed condition to the
 	// settled rows and slots; decideRole could not see either.
@@ -202,9 +209,11 @@ func Compute(in Inputs) Result {
 	// State: the rules, links, marks and routes this node should hold.
 	buildState(&res.State, in, idx, mappings, alloc)
 
-	// Class status: this node's Nodes row, link claims and GC, class
-	// conditions.
-	buildClassStatus(&res, in, idx, mappings, alloc, needed)
+	// Class status: this node's Nodes row and the class conditions.
+	buildClassStatus(&res, in, idx, alloc)
+
+	// The pool: Links to create, UnusedSince to set or clear, Links to delete.
+	res.Links = linkActions(alloc, in.NodeName, in.Now)
 
 	// PortMap status: emitted only by the node that owns each mapping.
 	buildPortMapStatus(&res, in, mappings)
@@ -217,12 +226,12 @@ func Compute(in Inputs) Result {
 // exemption, link, rules and route where this node holds a remote pod, and the
 // return-link device on whichever end this node sits. Every slice is sorted at
 // the end so the State never depends on map or input order.
-func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, alloc map[string]classAlloc) {
+func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, alloc linkAlloc) {
 	for _, m := range mappings {
 		if !m.accepted || m.endpoint == nil || m.effAccepting == "" {
 			continue
 		}
-		emitMapping(st, in, idx, m, alloc[m.pm.Spec.ClassName])
+		emitMapping(st, in, idx, m, alloc)
 	}
 	unifyLinkAddr6(st)
 	st.LocalAddrs = sortedAddrs(in.LocalAddrs)
@@ -283,7 +292,7 @@ func podAddrs(in Inputs, m *mapping) []netip.Addr {
 // each family podAddrs returns. A rule that carries an address is written once
 // per family; the link device, the loop guard and the conntrack save rule
 // carry none of the pod's addresses and are written once.
-func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc classAlloc) {
+func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc linkAlloc) {
 	this := in.NodeName
 	endpointNode := m.endpoint.node
 	pods := podAddrs(in, m)
@@ -313,7 +322,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 		var link *linkParams
 		if this != endpointNode {
 			if slot, ok := alloc.landedSlotFor(m, this); ok {
-				if lp, ok := buildLinkParams(idx, m.class, alloc, this, endpointNode, slot); ok {
+				if lp, ok := buildLinkParams(idx, classUnderlay(m.class), this, endpointNode, slot, linkPort(in)); ok {
 					link = &lp
 				}
 			}
@@ -374,7 +383,7 @@ func emitMapping(st *datapath.State, in Inputs, idx *index, m *mapping, alloc cl
 			if !ok {
 				continue
 			}
-			if lp, ok := buildLinkParams(idx, m.class, alloc, this, peer, slot); ok {
+			if lp, ok := buildLinkParams(idx, classUnderlay(m.class), this, peer, slot, linkPort(in)); ok {
 				links = append(links, lp)
 			}
 		}
@@ -498,7 +507,7 @@ func remoteProgrammers(m *mapping, this string) []string {
 // do not serve the mapping and do not gate its condition. Until the gate
 // clears the status names what is missing; the level-driven requeue heals
 // it and the reported state is honest during the window.
-func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[string]classAlloc) {
+func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc linkAlloc) {
 	for _, m := range mappings {
 		if !m.gated {
 			continue
@@ -519,13 +528,12 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 			continue
 		}
 		if m.remote {
-			a := alloc[m.pm.Spec.ClassName]
 			// Every programmer off the pod's node needs its own landed slot
 			// and a buildable link. Under Single there is one; under Multi the
 			// mapping is not fully programmed until the last of them is.
 			stalled := false
 			for _, peer := range remoteProgrammers(m, m.endpoint.node) {
-				slot, ok := a.landedSlotFor(m, peer)
+				slot, ok := alloc.landedSlotFor(m, peer)
 				if !ok {
 					m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
 						fmt.Sprintf("return link for %s is not claimed yet",
@@ -533,7 +541,7 @@ func resolveProgrammed(in Inputs, idx *index, mappings []*mapping, alloc map[str
 					stalled = true
 					break
 				}
-				if _, ok := buildLinkParams(idx, m.class, a, peer, m.endpoint.node, slot); !ok {
+				if _, ok := buildLinkParams(idx, classUnderlay(m.class), peer, m.endpoint.node, slot, linkPort(in)); !ok {
 					m.setProgrammed(metav1.ConditionFalse, v1alpha1.ReasonReturnPathUnavailable,
 						fmt.Sprintf("node %s on the return path has no usable address", peer), in.Now)
 					stalled = true

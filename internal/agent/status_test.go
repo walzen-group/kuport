@@ -19,55 +19,161 @@ import (
 	kreconcile "github.com/walzen-group/kuport/internal/reconcile"
 )
 
-// TestMergeClaimAdoptsACorrectedSubnet: an existing claim keeps its slot and
-// its identity, and the recorded subnet is text derived from the class subnet
-// and that slot. Compute rewrites it when a class's subnet changes, so the
-// merge has to take it; returning early on the key alone silently discarded the
-// correction and the status went on naming a /31 the link no longer carried.
-func TestMergeClaimAdoptsACorrectedSubnet(t *testing.T) {
-	links := []v1alpha1.LinkAllocation{
-		{Key: "node-a/node-b", Slot: 1, Subnet: "169.254.77.2/31"},
-	}
-	mergeClaim(&links, v1alpha1.LinkAllocation{
-		Key: "node-a/node-b", Slot: 1, Subnet: "169.254.79.2/31",
-	})
-
-	if len(links) != 1 {
-		t.Fatalf("links = %+v, want the existing claim kept, not a second one", links)
-	}
-	if got, want := links[0].Subnet, "169.254.79.2/31"; got != want {
-		t.Errorf("subnet = %s, want %s", got, want)
-	}
-	if links[0].Slot != 1 {
-		t.Errorf("slot = %d, want 1; the slot is the identity and never moves", links[0].Slot)
-	}
-}
-
-// TestMergeClaimKeepsSlotOnAMismatch: a proposal computed against a stale view
-// can name a different slot for the same pair. The recorded slot wins, and its
-// subnet is left alone rather than taking text derived from the wrong slot.
-func TestMergeClaimKeepsSlotOnAMismatch(t *testing.T) {
-	links := []v1alpha1.LinkAllocation{
-		{Key: "node-a/node-b", Slot: 1, Subnet: "169.254.77.2/31"},
-	}
-	mergeClaim(&links, v1alpha1.LinkAllocation{
-		Key: "node-a/node-b", Slot: 5, Subnet: "169.254.77.10/31",
-	})
-
-	if links[0].Slot != 1 || links[0].Subnet != "169.254.77.2/31" {
-		t.Errorf("claim = %+v, want slot 1 and its own subnet untouched", links[0])
-	}
-}
-
-func vxlanClass(name string, port int32) *v1alpha1.PortMapClass {
-	c := &v1alpha1.PortMapClass{
+func vxlanClass(name string) *v1alpha1.PortMapClass {
+	return &v1alpha1.PortMapClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       v1alpha1.PortMapClassSpec{ReturnPath: v1alpha1.ReturnPath{Mode: v1alpha1.ReturnPathVxlan}},
 	}
-	if port != 0 {
-		c.Spec.ReturnPath.Vxlan = &v1alpha1.VxlanConfig{Port: port}
+}
+
+func poolLink(slot int, peers ...string) *v1alpha1.Link {
+	return &v1alpha1.Link{
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("slot-%d", slot)},
+		Spec: v1alpha1.LinkSpec{
+			ClassKind: v1alpha1.ClassKindPortMapClass,
+			ClassName: "public",
+			Peers:     peers,
+		},
 	}
-	return c
+}
+
+// TestWriteLinksCreateLosesTheRace: two agents computed against the same pool
+// both create slot-1. The second create finds the name taken, which is how the
+// API server keeps two links off one slot; the agent leaves the first Link as
+// it is and reports no error, and its next pass picks another slot.
+func TestWriteLinksCreateLosesTheRace(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1alpha1.Link{}).Build()
+	ctx := context.Background()
+
+	first := &Reconciler{Client: c, NodeName: "node-b"}
+	second := &Reconciler{Client: c, NodeName: "node-c"}
+	if err := first.writeLinks(ctx, kreconcile.LinkActions{Create: []v1alpha1.Link{*poolLink(1, "node-a", "node-b")}}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := second.writeLinks(ctx, kreconcile.LinkActions{Create: []v1alpha1.Link{*poolLink(1, "node-a", "node-c")}}); err != nil {
+		t.Fatalf("second create returned %v, want AlreadyExists swallowed", err)
+	}
+
+	var got v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-1"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Peers[1] != "node-b" {
+		t.Errorf("slot-1 peers = %v, want the first claim's [node-a node-b] kept", got.Spec.Peers)
+	}
+}
+
+// TestWriteLinksPersistsUnusedSince is the release regression. Before the Link
+// kind, the agent passed the computed UnusedSince through a merge that cleared
+// it on every existing claim, so no claim was ever released. The value Compute
+// decides is now the value written.
+func TestWriteLinksPersistsUnusedSince(t *testing.T) {
+	l := poolLink(0, "node-a", "node-b")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(l).WithStatusSubresource(&v1alpha1.Link{}).Build()
+	ctx := context.Background()
+
+	var seen v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-0"}, &seen); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	now := fixedNow()
+	r := &Reconciler{Client: c, NodeName: "node-c"}
+	if err := r.writeLinks(ctx, kreconcile.LinkActions{Status: []kreconcile.LinkStatusUpdate{
+		{Name: "slot-0", ResourceVersion: seen.ResourceVersion, UnusedSince: &now},
+	}}); err != nil {
+		t.Fatalf("writeLinks: %v", err)
+	}
+
+	var got v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-0"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status.UnusedSince == nil || !got.Status.UnusedSince.Equal(&now) {
+		t.Errorf("UnusedSince = %v, want %v written", got.Status.UnusedSince, now)
+	}
+}
+
+// TestWriteLinksSkipsAMovedObject: an update computed against an older version
+// of the Link is dropped. The newer version may carry a decision this pass
+// never saw, such as another agent clearing UnusedSince because the pair is
+// needed again.
+func TestWriteLinksSkipsAMovedObject(t *testing.T) {
+	l := poolLink(0, "node-a", "node-b")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(l).WithStatusSubresource(&v1alpha1.Link{}).Build()
+	ctx := context.Background()
+
+	now := fixedNow()
+	r := &Reconciler{Client: c, NodeName: "node-c"}
+	if err := r.writeLinks(ctx, kreconcile.LinkActions{Status: []kreconcile.LinkStatusUpdate{
+		{Name: "slot-0", ResourceVersion: "1", UnusedSince: &now},
+	}}); err != nil {
+		t.Fatalf("writeLinks: %v", err)
+	}
+	var got v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-0"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ResourceVersion == "1" {
+		t.Fatal("fixture: the object must be past version 1 for this test to mean anything")
+	}
+	if got.Status.UnusedSince != nil {
+		t.Errorf("UnusedSince = %v, want nothing written against a moved object", got.Status.UnusedSince)
+	}
+}
+
+// TestWriteLinksDeleteHonoursTheVersion: a delete goes through against the
+// version Compute saw and is refused against any other.
+func TestWriteLinksDeleteHonoursTheVersion(t *testing.T) {
+	l := poolLink(0, "node-a", "node-b")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(l).WithStatusSubresource(&v1alpha1.Link{}).Build()
+	ctx := context.Background()
+	r := &Reconciler{Client: c, NodeName: "node-c"}
+
+	if err := r.writeLinks(ctx, kreconcile.LinkActions{Delete: []kreconcile.LinkDelete{{Name: "slot-0", ResourceVersion: "1"}}}); err != nil {
+		t.Fatalf("stale delete: %v", err)
+	}
+	var got v1alpha1.Link
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-0"}, &got); err != nil {
+		t.Fatalf("the delete against an old version removed the Link: %v", err)
+	}
+
+	if err := r.writeLinks(ctx, kreconcile.LinkActions{Delete: []kreconcile.LinkDelete{{Name: "slot-0", ResourceVersion: got.ResourceVersion}}}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "slot-0"}, &got); !kerrors.IsNotFound(err) {
+		t.Errorf("get after delete = %v, want NotFound", err)
+	}
+}
+
+// TestWriteClassClearsLegacyLinks: the accepting agent removes the status.links
+// a release before the Link kind wrote, and keeps every other field.
+func TestWriteClassClearsLegacyLinks(t *testing.T) {
+	cls := vxlanClass("public")
+	cls.Status.Links = []v1alpha1.LinkAllocation{{Key: "node-a/node-b", Peers: []string{"node-a", "node-b"}, Subnet: "169.254.77.0/31"}}
+	cls.Status.Nodes = []v1alpha1.NodeStatus{{Name: "b", Ready: true}}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(cls).WithStatusSubresource(cls).Build()
+	ctx := context.Background()
+
+	r := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{}}
+	contrib := kreconcile.ClassContribution{Node: v1alpha1.NodeStatus{Name: "a", Ready: true}, ClearLegacyLinks: true}
+	if err := r.writeClass(ctx, "public", contrib, hostState{}); err != nil {
+		t.Fatalf("writeClass: %v", err)
+	}
+	var got v1alpha1.PortMapClass
+	if err := c.Get(ctx, types.NamespacedName{Name: "public"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Status.Links) != 0 {
+		t.Errorf("status.links = %+v, want it removed", got.Status.Links)
+	}
+	if !hasNode(got.Status.Nodes, "b") {
+		t.Error("another agent's row b was removed with the legacy links")
+	}
 }
 
 // TestWritePortMapStatus writes an owned PortMap's status and confirms the
@@ -309,7 +415,7 @@ func published(rows []v1alpha1.PublishedAddress, node, iface string) string {
 // other row, and this test would fail — which is the point.
 func TestWriteClassStatusConflictRetryRecomputes(t *testing.T) {
 	scheme := testScheme(t)
-	cls := vxlanClass("public", 0)
+	cls := vxlanClass("public")
 	base := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(cls).WithStatusSubresource(cls).Build()
 
@@ -361,56 +467,6 @@ func TestWriteClassStatusConflictRetryRecomputes(t *testing.T) {
 	}
 }
 
-// TestLinkClaimCollision has two agents propose a claim that lands on the same
-// slot. The first writes it; the second must find the slot taken by another pair
-// and leave it alone rather than overwrite, per the recorded-claim rule.
-func TestLinkClaimCollision(t *testing.T) {
-	scheme := testScheme(t)
-	cls := vxlanClass("public", 0)
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(cls).WithStatusSubresource(cls).Build()
-
-	claim := func(key string, peers []string, slot int32) kreconcile.ClassContribution {
-		return kreconcile.ClassContribution{ClaimLinks: []v1alpha1.LinkAllocation{
-			{Key: key, Peers: peers, Subnet: "169.254.77.0/31", Slot: slot},
-		}}
-	}
-
-	agentA := &Reconciler{Client: c, NodeName: "a", Now: fixedNow, Host: &fakeHost{}}
-	agentB := &Reconciler{Client: c, NodeName: "c", Now: fixedNow, Host: &fakeHost{}}
-
-	// Agent A claims pair a/b at slot 0.
-	if err := agentA.writeClass(context.Background(), "public", claim("a/b", []string{"a", "b"}, 0), hostState{}); err != nil {
-		t.Fatalf("agent A writeClass: %v", err)
-	}
-	// Agent B, computed against the same empty status, also wants slot 0 for a/c.
-	if err := agentB.writeClass(context.Background(), "public", claim("a/c", []string{"a", "c"}, 0), hostState{}); err != nil {
-		t.Fatalf("agent B writeClass: %v", err)
-	}
-
-	var got v1alpha1.PortMapClass
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "public"}, &got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if len(got.Status.Links) != 1 {
-		t.Fatalf("links = %d, want 1 (B must not overwrite A's slot)", len(got.Status.Links))
-	}
-	if got.Status.Links[0].Key != "a/b" || got.Status.Links[0].Slot != 0 {
-		t.Errorf("surviving claim = %+v, want a/b at slot 0", got.Status.Links[0])
-	}
-
-	// On its next pass B recomputes against the fresh status and takes slot 1.
-	if err := agentB.writeClass(context.Background(), "public", claim("a/c", []string{"a", "c"}, 1), hostState{}); err != nil {
-		t.Fatalf("agent B recompute: %v", err)
-	}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "public"}, &got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if len(got.Status.Links) != 2 {
-		t.Fatalf("links = %d, want 2 after B's recompute", len(got.Status.Links))
-	}
-}
-
 // TestConditionOverlay checks the host-only class conditions layer over
 // Compute's Ready condition: a port collision refuses the class, and a
 // None-mode class takes neither.
@@ -424,26 +480,28 @@ func TestConditionOverlay(t *testing.T) {
 	}}
 
 	t.Run("native routing no longer refuses the class", func(t *testing.T) {
-		got := overlayConditions(validReady, vxlanClass("public", 0),
-			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472}, fixedNow())
+		got := overlayConditions(validReady, vxlanClass("public"),
+			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472, linkPort: 4790}, fixedNow())
 		assertReady(t, got, metav1.ConditionTrue, v1alpha1.ReasonValid)
 	})
 
-	t.Run("port collision refuses the class", func(t *testing.T) {
-		got := overlayConditions(validReady, vxlanClass("public", 8472),
-			hostState{tunnelKnown: true, tunnelOK: true, cniPort: 8472}, fixedNow())
+	t.Run("a link port on the CNI's refuses the class", func(t *testing.T) {
+		got := overlayConditions(validReady, vxlanClass("public"),
+			hostState{tunnelKnown: true, tunnelOK: true, cniPort: 8472, linkPort: 8472}, fixedNow())
 		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonVxlanPortConflict)
 	})
 
-	t.Run("port collision refuses it under native routing too", func(t *testing.T) {
-		got := overlayConditions(validReady, vxlanClass("public", 8472),
-			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472}, fixedNow())
-		assertReady(t, got, metav1.ConditionFalse, v1alpha1.ReasonVxlanPortConflict)
+	t.Run("a class's deprecated port is ignored", func(t *testing.T) {
+		cls := vxlanClass("public")
+		cls.Spec.ReturnPath.Vxlan = &v1alpha1.VxlanConfig{Port: 8472}
+		got := overlayConditions(validReady, cls,
+			hostState{tunnelKnown: true, tunnelOK: false, cniPort: 8472, linkPort: 4790}, fixedNow())
+		assertReady(t, got, metav1.ConditionTrue, v1alpha1.ReasonValid)
 	})
 
 	t.Run("tunnel unknown leaves Compute's condition alone", func(t *testing.T) {
-		got := overlayConditions(validReady, vxlanClass("public", 4790),
-			hostState{tunnelKnown: false, cniPort: 8472}, fixedNow())
+		got := overlayConditions(validReady, vxlanClass("public"),
+			hostState{tunnelKnown: false, cniPort: 8472, linkPort: 4790}, fixedNow())
 		assertReady(t, got, metav1.ConditionTrue, v1alpha1.ReasonValid)
 	})
 

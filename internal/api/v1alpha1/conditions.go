@@ -19,6 +19,16 @@ const (
 const (
 	// ConditionReady reports whether the class is usable.
 	ConditionReady = "Ready"
+
+	// ConditionDeprecated is True when the class sets a field kuport ignores.
+	// It leaves Ready alone: the class works, the field does nothing.
+	ConditionDeprecated = "Deprecated"
+)
+
+// PortMapClass Deprecated reasons.
+const (
+	ReasonDeprecatedField = "DeprecatedField"
+	ReasonNoDeprecated    = "NoDeprecatedFields"
 )
 
 // Shared True reason for Accepted and Ready.
@@ -54,6 +64,6 @@ const (
 const (
 	ReasonTunnelModeRequired = "TunnelModeRequired"
 	ReasonVxlanPortConflict  = "VxlanPortConflict"
-	ReasonSubnetExhausted    = "SubnetExhausted"
-	ReasonInvalidSubnet      = "InvalidSubnet"
+	// ReasonSubnetExhausted: every slot of the cluster-wide link pool is taken.
+	ReasonSubnetExhausted = "SubnetExhausted"
 )

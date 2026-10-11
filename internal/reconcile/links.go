@@ -1,13 +1,13 @@
 package reconcile
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math/bits"
 	"net/netip"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,13 +16,36 @@ import (
 	"github.com/walzen-group/kuport/internal/datapath"
 )
 
-// defaultSubnet is the class return-path subnet when none is set: 128 /31 slots.
-const defaultSubnet = "169.254.77.0/24"
+// Every return link in the cluster takes its numbers from one pool of slots. A
+// slot is claimed by creating the Link object named slot-<n>; the API server
+// refuses a second create of that name, so no two links anywhere share a slot,
+// whichever classes they belong to. docs/decisions.md records why the pool is
+// cluster-wide.
+const (
+	// linkSlots is the size of the pool.
+	linkSlots = 1024
+	// linkSlotPrefix is the name prefix of every Link object.
+	linkSlotPrefix = "slot-"
+	// vniBase is the VNI of slot 0.
+	vniBase = 7000
+	// tableBase is the routing table of slot 0. Tables 253 to 255 belong to
+	// the kernel, and the old per-class tables ran from 200.
+	tableBase = 1000
+	// defaultLinkPort is the links' UDP port when the agent sets none.
+	defaultLinkPort = 4790
+	// unusedLinkAge is how long a Link may sit unused before any agent
+	// deletes it.
+	unusedLinkAge = 24 * time.Hour
+)
 
-// defaultSubnet6 is the IPv6 return-path subnet when none is set: 32768 /127
-// slots, of which a slot uses the one its /31 does. The 40 bits after fd are
-// random, per RFC 4193.
-const defaultSubnet6 = "fd64:f5ac:e961::/112"
+var (
+	// linkSubnet holds a /31 per slot: 1024 of them in a /21.
+	linkSubnet = netip.MustParsePrefix("169.254.64.0/21")
+	// linkSubnet6 holds a /127 per slot. The 40 bits after fd are random, per
+	// RFC 4193, the prefix the old per-class default used; ::1:0 keeps it
+	// clear of that default's ::/112.
+	linkSubnet6 = netip.MustParsePrefix("fd64:f5ac:e961::1:0/112")
+)
 
 // ipv6MinMTU is the smallest MTU a device may have and still carry IPv6. The
 // kernel refuses an IPv6 address on a smaller device, and that refusal would
@@ -33,107 +56,151 @@ const ipv6MinMTU = 1280
 // diversion narrow. The high bits spell "kp".
 const markBase uint32 = 0x6b700000
 
-// neededPair is a node pair that needs a return link, with the set of nodes that
-// hold a chosen endpoint on it. Only a holder proposes a new claim.
+// linkClass names the class a link belongs to.
+type linkClass struct {
+	kind string
+	name string
+}
+
+// neededPair is a node pair a class needs a return link for, with the set of
+// nodes that hold a chosen endpoint on it. Only a holder proposes a new Link.
 type neededPair struct {
-	key     string
+	class   linkClass
 	peers   [2]string
 	holders map[string]bool
 }
 
-// classAlloc is the settled slot allocation for one class in this pass: the
-// existing claims read from status, the slots newly assigned to needed pairs
-// that had none, and whether the subnet ran out or failed to parse. A newly
-// assigned slot exists only to propose its claim; nothing that carries the
-// slot into the host is built until the claim lands in existing.
-type classAlloc struct {
-	subnet        netip.Prefix
-	invalidSubnet bool
-	// subnet6 is the IPv6 subnet the links' /127s come from. It is invalid,
-	// and the links carry IPv4 alone, when the class's subnet6 does not parse
-	// as IPv6 or holds fewer /127s than subnet holds /31s.
-	subnet6        netip.Prefix
-	invalidSubnet6 bool
-	exhausted      bool
-	existing       map[string]v1alpha1.LinkAllocation
-	needed         map[string]neededPair
-	newly          map[string]int // key -> slot, to propose as a claim
+// key identifies the pair within its class, the same way a Link's spec does.
+func (p neededPair) key() string { return classLinkKey(p.class, p.peers) }
+
+// classLinkKey is the class kind, the class name and the sorted peers, joined.
+func classLinkKey(c linkClass, peers [2]string) string {
+	return c.kind + "/" + c.name + "/" + peers[0] + "/" + peers[1]
 }
 
-// neededPairsByClass groups the return-link pairs every accepted mapping needs,
-// keyed by class name. A pair is needed for each programming node that sits off
+// specKey is classLinkKey read off a Link object, and false for a malformed spec.
+func specKey(l *v1alpha1.Link) (string, bool) {
+	if len(l.Spec.Peers) != 2 {
+		return "", false
+	}
+	p := sortedPair(l.Spec.Peers[0], l.Spec.Peers[1])
+	return classLinkKey(linkClass{kind: l.Spec.ClassKind, name: l.Spec.ClassName}, p), true
+}
+
+// slotOf parses a Link's name into its slot, and false for a name outside the
+// pool. Such an object is left alone.
+func slotOf(name string) (int, bool) {
+	rest, ok := strings.CutPrefix(name, linkSlotPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 0 || n >= linkSlots || strconv.Itoa(n) != rest {
+		return 0, false
+	}
+	return n, true
+}
+
+// slotName is the Link object name for a slot.
+func slotName(slot int) string { return linkSlotPrefix + strconv.Itoa(slot) }
+
+// neededPairs collects the return-link pairs every accepted mapping needs,
+// keyed by classLinkKey. A pair is needed for each programming node that sits off
 // the chosen endpoint's node. Under Single that is at most one pair; under
 // Multi it is one per accepting node that lacks the pod, since each of them
 // forwards and each needs its own way back.
-func neededPairsByClass(mappings []*mapping) map[string]map[string]neededPair {
-	out := map[string]map[string]neededPair{}
+func neededPairs(mappings []*mapping) map[string]neededPair {
+	out := map[string]neededPair{}
 	for _, m := range mappings {
 		if !m.accepted || m.endpoint == nil || m.effAccepting == "" || !m.remote {
 			continue
 		}
-		cls := m.pm.Spec.ClassName
+		cls := linkClass{kind: v1alpha1.ClassKindPortMapClass, name: m.pm.Spec.ClassName}
 		for _, peer := range remoteProgrammers(m, m.endpoint.node) {
-			key := pairKey(peer, m.endpoint.node)
-			byKey := out[cls]
-			if byKey == nil {
-				byKey = map[string]neededPair{}
-				out[cls] = byKey
-			}
-			p, ok := byKey[key]
-			if !ok {
-				p = neededPair{key: key, peers: sortedPair(peer, m.endpoint.node), holders: map[string]bool{}}
-			}
-			p.holders[m.endpoint.node] = true
-			byKey[key] = p
+			addNeeded(out, cls, peer, m.endpoint.node)
 		}
 	}
 	return out
 }
 
-// allocateClass settles the slot for every needed pair of a class. Existing
-// claims keep their slot untouched; a needed pair without a claim takes the
-// lowest free slot, assigned in sorted key order so every agent computes the
-// same map.
-func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) classAlloc {
-	a := classAlloc{
-		existing: map[string]v1alpha1.LinkAllocation{},
-		needed:   needed,
-		newly:    map[string]int{},
-	}
-
-	subnet, err := parseClassSubnet(class)
-	if err != nil {
-		a.invalidSubnet = true
-		return a
-	}
-	a.subnet = subnet
-	total := slotCount(subnet)
-
-	if s6, err := parseClassSubnet6(class, total); err == nil {
-		a.subnet6 = s6
+// addNeeded records that holder needs a link of a class to peer.
+func addNeeded(out map[string]neededPair, cls linkClass, peer, holder string) {
+	np := neededPair{class: cls, peers: sortedPair(peer, holder)}
+	key := np.key()
+	if have, ok := out[key]; ok {
+		np = have
 	} else {
-		a.invalidSubnet6 = true
+		np.holders = map[string]bool{}
 	}
+	np.holders[holder] = true
+	out[key] = np
+}
 
+// heldLink is one Link object in the pool.
+type heldLink struct {
+	link *v1alpha1.Link
+	slot int
+}
+
+// linkAlloc is the pool as of this pass: the Link each key uses, the Links
+// that duplicate a key's lower slot, the slots newly picked for needed pairs
+// that have none, and the classes a full pool left without one. A newly picked
+// slot exists only to propose its Link; nothing that carries the slot into the
+// host is built until the Link is in the cache.
+type linkAlloc struct {
+	byKey      map[string]heldLink
+	duplicates map[string][]heldLink // key -> Links above the slot byKey uses
+	needed     map[string]neededPair
+	newly      map[string]int
+	exhausted  map[linkClass]bool
+	all        []heldLink
+}
+
+// allocateLinks settles the slot of every needed pair. A key with Links keeps
+// the lowest of their slots. A needed key with none gets the lowest slot no
+// Link holds, assigned in sorted key order so every agent computes the same
+// proposal.
+func allocateLinks(links []*v1alpha1.Link, needed map[string]neededPair) linkAlloc {
+	a := linkAlloc{
+		byKey:      map[string]heldLink{},
+		duplicates: map[string][]heldLink{},
+		needed:     needed,
+		newly:      map[string]int{},
+		exhausted:  map[linkClass]bool{},
+	}
 	used := map[int]bool{}
-	for _, la := range class.Status.Links {
-		a.existing[la.Key] = la
-		used[int(la.Slot)] = true
+	for _, l := range links {
+		slot, ok := slotOf(l.Name)
+		if !ok {
+			continue
+		}
+		used[slot] = true
+		if _, ok := specKey(l); !ok {
+			continue
+		}
+		a.all = append(a.all, heldLink{link: l, slot: slot})
+	}
+	sort.Slice(a.all, func(i, j int) bool { return a.all[i].slot < a.all[j].slot })
+	for _, h := range a.all {
+		key, _ := specKey(h.link)
+		if _, ok := a.byKey[key]; ok {
+			a.duplicates[key] = append(a.duplicates[key], h)
+			continue
+		}
+		a.byKey[key] = h
 	}
 
 	keys := make([]string, 0, len(needed))
 	for k := range needed {
-		if _, ok := a.existing[k]; ok {
-			continue
+		if _, ok := a.byKey[k]; !ok {
+			keys = append(keys, k)
 		}
-		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
 	for _, k := range keys {
-		slot := lowestFree(used, total)
+		slot := lowestFree(used, linkSlots)
 		if slot < 0 {
-			a.exhausted = true
+			a.exhausted[needed[k].class] = true
 			continue
 		}
 		a.newly[k] = slot
@@ -142,18 +209,97 @@ func allocateClass(class *v1alpha1.PortMapClass, needed map[string]neededPair) c
 	return a
 }
 
-// landedSlotFor returns the slot of the return-link pair between one peer and
-// the mapping's endpoint node, when the claim has landed in the class status,
-// and false while it is still propagating. Marks, divert rules, links and
-// routes all carry the slot; emitting any of them against a tentative
-// allocation lets a lost claim race mark packets with a slot another pair
-// already holds. It takes the peer rather than reading one off the mapping
-// because Multi serving gives the pod's node a link per remote programmer,
-// each on its own slot, so a reply can leave by the link its request arrived on.
-func (a classAlloc) landedSlotFor(m *mapping, peer string) (int, bool) {
-	key := pairKey(peer, m.endpoint.node)
-	la, ok := a.existing[key]
-	return int(la.Slot), ok
+// slotFor returns the slot of a class's link between two nodes once its Link
+// is in the cache, and false while it is still being created. Marks, divert
+// rules, links and routes all carry the slot; emitting any of them against a
+// proposed slot lets a lost create race mark packets with a slot another link
+// holds.
+func (a linkAlloc) slotFor(cls linkClass, x, y string) (int, bool) {
+	h, ok := a.byKey[classLinkKey(cls, sortedPair(x, y))]
+	return h.slot, ok
+}
+
+// landedSlotFor is slotFor for one of a mapping's return links: the one between
+// a programmer and the endpoint's node. It takes the peer rather than reading
+// one off the mapping because Multi serving gives the pod's node a link per
+// remote programmer, each on its own slot, so a reply can leave by the link its
+// request arrived on.
+func (a linkAlloc) landedSlotFor(m *mapping, peer string) (int, bool) {
+	return a.slotFor(linkClass{kind: v1alpha1.ClassKindPortMapClass, name: m.pm.Spec.ClassName}, peer, m.endpoint.node)
+}
+
+// LinkStatusUpdate sets or clears one Link's UnusedSince. ResourceVersion is
+// the version this pass read, so a write against a newer object conflicts and
+// is recomputed.
+type LinkStatusUpdate struct {
+	Name            string
+	ResourceVersion string
+	UnusedSince     *metav1.Time
+}
+
+// LinkDelete removes one Link, on the condition that it is still the version
+// this pass read.
+type LinkDelete struct {
+	Name            string
+	ResourceVersion string
+}
+
+// LinkActions are the writes to the Link pool this node makes in one pass.
+type LinkActions struct {
+	Create []v1alpha1.Link
+	Status []LinkStatusUpdate
+	Delete []LinkDelete
+}
+
+// linkActions computes this node's writes to the pool. Every agent computes
+// the same needed set, so every agent may set, clear or act on UnusedSince,
+// and a Link whose nodes are both gone is still released. Only a pair's holder
+// creates its Link and deletes the duplicates of it, since the holder is the
+// one agent that proposes the pair.
+func linkActions(a linkAlloc, nodeName string, now metav1.Time) LinkActions {
+	var out LinkActions
+
+	keys := make([]string, 0, len(a.newly))
+	for k := range a.newly {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		np := a.needed[k]
+		if !np.holders[nodeName] {
+			continue
+		}
+		out.Create = append(out.Create, v1alpha1.Link{
+			ObjectMeta: metav1.ObjectMeta{Name: slotName(a.newly[k])},
+			Spec: v1alpha1.LinkSpec{
+				ClassKind: np.class.kind,
+				ClassName: np.class.name,
+				Peers:     []string{np.peers[0], np.peers[1]},
+			},
+		})
+	}
+
+	for _, h := range a.all {
+		key, _ := specKey(h.link)
+		np, isNeeded := a.needed[key]
+		isDuplicate := a.byKey[key].slot != h.slot
+		since := h.link.Status.UnusedSince
+
+		switch {
+		case isNeeded && isDuplicate:
+			if np.holders[nodeName] {
+				out.Delete = append(out.Delete, LinkDelete{Name: h.link.Name, ResourceVersion: h.link.ResourceVersion})
+			}
+		case isNeeded && since != nil:
+			out.Status = append(out.Status, LinkStatusUpdate{Name: h.link.Name, ResourceVersion: h.link.ResourceVersion})
+		case !isNeeded && since == nil:
+			t := now
+			out.Status = append(out.Status, LinkStatusUpdate{Name: h.link.Name, ResourceVersion: h.link.ResourceVersion, UnusedSince: &t})
+		case !isNeeded && now.Sub(since.Time) > unusedLinkAge:
+			out.Delete = append(out.Delete, LinkDelete{Name: h.link.Name, ResourceVersion: h.link.ResourceVersion})
+		}
+	}
+	return out
 }
 
 // linkParams holds every value derived from a slot for one end of a return link.
@@ -167,8 +313,8 @@ type linkParams struct {
 	thisEnd    netip.Addr // this node's /31 address
 	peerEnd    netip.Addr // peer's /31 address
 	linkAddr   netip.Prefix
-	// The IPv6 ends, set when the class's subnet6 is usable and the link is
-	// large enough for IPv6; has6 says which.
+	// The IPv6 ends, set when the link is large enough for IPv6; has6 says
+	// which.
 	has6       bool
 	thisEnd6   netip.Addr
 	peerEnd6   netip.Addr
@@ -181,16 +327,17 @@ type linkParams struct {
 	mtu        uint32 // 0 when neither node has reported an underlay yet
 }
 
-// buildLinkParams derives the link for the pair (thisNode, peer) at a slot. It
-// returns false when either node's address or the subnet cannot be resolved.
-func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, a classAlloc, thisNode, peer string, slot int) (linkParams, bool) {
+// buildLinkParams derives the link for the pair (thisNode, peer) at a slot.
+// underlay reads a node's reported underlay MTU from the class status. It
+// returns false when either node's address cannot be resolved.
+func buildLinkParams(idx *index, underlay func(node string) int, thisNode, peer string, slot int, port uint16) (linkParams, bool) {
 	local, err1 := netip.ParseAddr(nodeAddrOf(idx, thisNode))
 	remote, err2 := netip.ParseAddr(nodeAddrOf(idx, peer))
 	if err1 != nil || err2 != nil {
 		return linkParams{}, false
 	}
 
-	// The lower-named node takes the low address of each pair, in both
+	// The lower-named node gets the low address of each pair, in both
 	// families, so both ends compute each other's addresses from the slot.
 	first := thisNode == sortedPair(thisNode, peer)[0]
 	ends := func(lo, hi netip.Addr) (netip.Addr, netip.Addr) {
@@ -199,17 +346,13 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, a classAlloc, thi
 		}
 		return hi, lo
 	}
-	thisEnd, peerEnd := ends(nthSlash31(a.subnet, slot))
+	thisEnd, peerEnd := ends(nthSlash31(linkSubnet, slot))
 
-	// The kernel keys a VXLAN device by VNI and UDP port, so two links on one
-	// node cannot share both. Under Multi serving the pod's node holds a link
-	// per remote accepting node, so the VNI carries the slot: the class's VNI
-	// is the base and each pair sits at base+slot. Both ends derive it from the
-	// same recorded slot, so they agree without negotiating.
-	vni, port := vxlanParams(class)
+	// The kernel keys a VXLAN device by VNI and UDP port, and every link
+	// shares the port, so the VNI carries the slot.
 	lp := linkParams{
 		slot:       slot,
-		name:       linkName(class.Name, peer),
+		name:       linkName(slot),
 		localAddr:  local,
 		remoteAddr: remote,
 		thisEnd:    thisEnd,
@@ -217,20 +360,28 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, a classAlloc, thi
 		linkAddr:   netip.PrefixFrom(thisEnd, 31),
 		peerNode32: netip.PrefixFrom(remote, 32),
 		mark:       markBase | uint32(slot),
-		table:      200 + uint32(slot),
-		vni:        vni + uint32(slot),
+		table:      tableBase + uint32(slot),
+		vni:        vniBase + uint32(slot),
 		port:       port,
-		mtu:        linkMTUFor(class, thisNode, peer, local.Is4() && remote.Is4()),
+		mtu:        linkMTUFor(underlay(thisNode), underlay(peer), local.Is4() && remote.Is4()),
 	}
 
-	// Both ends read the same subnet6 and the same two MTU rows, so they agree
-	// on whether the link carries IPv6 as they agree on everything else.
-	if a.subnet6.IsValid() && (lp.mtu == 0 || lp.mtu >= ipv6MinMTU) {
+	// Both ends read the same two MTU rows, so they agree on whether the link
+	// carries IPv6 as they agree on everything else.
+	if lp.mtu == 0 || lp.mtu >= ipv6MinMTU {
 		lp.has6 = true
-		lp.thisEnd6, lp.peerEnd6 = ends(nthSlash127(a.subnet6, slot))
+		lp.thisEnd6, lp.peerEnd6 = ends(nthSlash127(linkSubnet6, slot))
 		lp.linkAddr6 = netip.PrefixFrom(lp.thisEnd6, 127)
 	}
 	return lp, true
+}
+
+// linkPort is the links' UDP port, the agent's setting or the default.
+func linkPort(in Inputs) uint16 {
+	if in.LinkPort != 0 {
+		return in.LinkPort
+	}
+	return defaultLinkPort
 }
 
 // linkMTUFor sizes the device to the path it rides: the smaller of the two
@@ -238,79 +389,45 @@ func buildLinkParams(idx *index, class *v1alpha1.PortMapClass, a classAlloc, thi
 // the class status, so the two ends agree without exchanging anything. A peer
 // that has not reported yet leaves the link at this node's own figure, and the
 // pass that follows the peer's first status write shrinks it.
-func linkMTUFor(class *v1alpha1.PortMapClass, thisNode, peer string, outerIsV4 bool) uint32 {
-	mtu := datapath.LinkMTUBetween(
-		underlayMTUOf(class, thisNode),
-		underlayMTUOf(class, peer),
-		outerIsV4,
-	)
+func linkMTUFor(thisUnderlay, peerUnderlay int, outerIsV4 bool) uint32 {
+	mtu := datapath.LinkMTUBetween(thisUnderlay, peerUnderlay, outerIsV4)
 	if mtu <= 0 {
 		return 0
 	}
 	return uint32(mtu)
 }
 
-// underlayMTUOf reads one node's reported underlay from the class status, or 0
-// when that node has written no row.
-func underlayMTUOf(class *v1alpha1.PortMapClass, name string) int {
-	if row := classNodeRow(class, name); row != nil {
-		return int(row.UnderlayMTU)
-	}
-	return 0
-}
-
-// vxlanParams returns the VNI and UDP port for a class's return links, with the
-// documented defaults when the vxlan block is absent.
-func vxlanParams(class *v1alpha1.PortMapClass) (vni uint32, port uint16) {
-	vni, port = 4242, 4790
-	if v := class.Spec.ReturnPath.Vxlan; v != nil {
-		if v.VNI != 0 {
-			vni = uint32(v.VNI)
+// classUnderlay reads nodes' reported underlay MTUs from a PortMapClass's
+// status, 0 for a node that has written no row.
+func classUnderlay(class *v1alpha1.PortMapClass) func(string) int {
+	return func(name string) int {
+		if row := classNodeRow(class, name); row != nil {
+			return int(row.UnderlayMTU)
 		}
-		if v.Port != 0 {
-			port = uint16(v.Port)
-		}
+		return 0
 	}
-	return
 }
 
-// parseClassSubnet parses a class's return-path subnet, masked to its prefix,
-// falling back to the default when unset.
-func parseClassSubnet(class *v1alpha1.PortMapClass) (netip.Prefix, error) {
-	s := defaultSubnet
-	if v := class.Spec.ReturnPath.Vxlan; v != nil && v.Subnet != "" {
-		s = v.Subnet
+// deprecatedVxlanFields names the ignored returnPath.vxlan fields a class sets.
+func deprecatedVxlanFields(class *v1alpha1.PortMapClass) []string {
+	v := class.Spec.ReturnPath.Vxlan
+	if v == nil {
+		return nil
 	}
-	p, err := netip.ParsePrefix(s)
-	if err != nil {
-		return netip.Prefix{}, err
+	var out []string
+	if v.VNI != 0 {
+		out = append(out, "returnPath.vxlan.vni")
 	}
-	if !p.Addr().Is4() {
-		return netip.Prefix{}, fmt.Errorf("subnet %q is not IPv4", s)
+	if v.Port != 0 {
+		out = append(out, "returnPath.vxlan.port")
 	}
-	return p.Masked(), nil
-}
-
-// parseClassSubnet6 parses a class's IPv6 return-path subnet, masked to its
-// prefix, falling back to the default when unset. A slot indexes both subnets,
-// so subnet6 must hold at least slots /127s.
-func parseClassSubnet6(class *v1alpha1.PortMapClass, slots int) (netip.Prefix, error) {
-	s := defaultSubnet6
-	if v := class.Spec.ReturnPath.Vxlan; v != nil && v.Subnet6 != "" {
-		s = v.Subnet6
+	if v.Subnet != "" {
+		out = append(out, "returnPath.vxlan.subnet")
 	}
-	p, err := netip.ParsePrefix(s)
-	if err != nil {
-		return netip.Prefix{}, err
+	if v.Subnet6 != "" {
+		out = append(out, "returnPath.vxlan.subnet6")
 	}
-	if !p.Addr().Is6() || p.Addr().Is4In6() {
-		return netip.Prefix{}, fmt.Errorf("subnet6 %q is not IPv6", s)
-	}
-	// A /(128-host) holds 2^(host-1) /127s, and a /128 holds none.
-	if host := 128 - p.Bits(); host < 1 || (host-1 < 31 && 1<<(host-1) < slots) {
-		return netip.Prefix{}, fmt.Errorf("subnet6 %q holds fewer than %d /127s", s, slots)
-	}
-	return p.Masked(), nil
+	return out
 }
 
 // nthSlash127 returns the two addresses of the slot-th /127 within an IPv6
@@ -327,15 +444,6 @@ func nthSlash127(subnet netip.Prefix, slot int) (netip.Addr, netip.Addr) {
 	}
 	off := uint64(slot) * 2
 	return at(off), at(off + 1)
-}
-
-// slotCount is how many /31s a subnet holds.
-func slotCount(subnet netip.Prefix) int {
-	host := 32 - subnet.Bits()
-	if host <= 1 {
-		return 1 << 0
-	}
-	return 1 << (host - 1)
 }
 
 // nthSlash31 returns the two addresses of the slot-th /31 within a subnet.
@@ -358,21 +466,14 @@ func lowestFree(used map[int]bool, total int) int {
 	return -1
 }
 
-// linkName is the vxlan device name for one class's link to a peer: a short
-// hash of the class name and the peer's node name, so both ends and every agent
-// name the same device.
-//
-// The class is in the hash because two classes can want a link between the same
-// pair of nodes, each on its own subnet and VNI. Hashing the peer alone gave
-// them one device name, so whichever class applied second added a route via an
-// address the existing device did not carry and failed with "network is
-// unreachable", which parked that node's agent and with it the DaemonSet.
-func linkName(class, peer string) string {
-	sum := sha256.Sum256([]byte(class + "/" + peer))
-	return "kup-" + hex.EncodeToString(sum[:])[:8]
+// linkName is the vxlan device name for the link at a slot. The slot is unique
+// cluster-wide, so two classes wanting a link between the same two nodes get
+// two devices, and both ends and every agent name each device the same.
+func linkName(slot int) string {
+	return fmt.Sprintf("kup-%d", slot)
 }
 
-// pairKey is the two node names sorted and joined with a slash, the LinkAllocation key.
+// pairKey is the two node names sorted and joined with a slash.
 func pairKey(a, b string) string {
 	p := sortedPair(a, b)
 	return p[0] + "/" + p[1]
@@ -384,54 +485,4 @@ func sortedPair(a, b string) [2]string {
 		return [2]string{a, b}
 	}
 	return [2]string{b, a}
-}
-
-// gcClaims walks a class's existing claims and returns the claim updates and
-// drops this pass calls for. A needed pair clears UnusedSince; an unneeded pair
-// sets it once to now; a pair unused for more than 24h is dropped. Any selecting
-// agent may run this; the write conflicts sort themselves out.
-func gcClaims(class *v1alpha1.PortMapClass, needed map[string]neededPair, now metav1.Time) (updates []v1alpha1.LinkAllocation, drops []string) {
-	subnet, subnetErr := parseClassSubnet(class)
-
-	for i := range class.Status.Links {
-		la := class.Status.Links[i]
-		_, isNeeded := needed[la.Key]
-
-		if !isNeeded && la.UnusedSince != nil && now.Sub(la.UnusedSince.Time) > 24*time.Hour {
-			drops = append(drops, la.Key)
-			continue
-		}
-
-		cp := la
-		changed := false
-
-		switch {
-		case isNeeded && la.UnusedSince != nil:
-			cp.UnusedSince = nil
-			changed = true
-		case !isNeeded && la.UnusedSince == nil:
-			t := now
-			cp.UnusedSince = &t
-			changed = true
-		}
-
-		// A link's addresses are derived from the class subnet and the slot
-		// every pass, never read back from here, so changing the subnet leaves
-		// this field naming a /31 nothing carries. A claim keeps its slot, so
-		// correcting the text is the whole repair.
-		if subnetErr == nil && int(la.Slot) >= 0 && int(la.Slot) < slotCount(subnet) {
-			lo, _ := nthSlash31(subnet, int(la.Slot))
-			if want := netip.PrefixFrom(lo, 31).String(); want != cp.Subnet {
-				cp.Subnet = want
-				changed = true
-			}
-		}
-
-		if changed {
-			updates = append(updates, cp)
-		}
-	}
-	sort.Slice(updates, func(i, j int) bool { return updates[i].Key < updates[j].Key })
-	sort.Strings(drops)
-	return
 }

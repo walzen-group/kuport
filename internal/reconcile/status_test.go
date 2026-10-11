@@ -29,13 +29,13 @@ func TestStatusOwnedByServingNode(t *testing.T) {
 				node("node-b", "10.0.0.2", nil),
 			},
 			Namespaces: []*corev1.Namespace{ns("games", nil)},
-			Classes: []*v1alpha1.PortMapClass{class("public", []string{"node-a"},
-				withLinks(claim("node-a", "node-b", 0)))},
-			PortMaps: []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
+			Classes:    []*v1alpha1.PortMapClass{class("public", []string{"node-a"})},
+			PortMaps:   []*v1alpha1.PortMap{pm("games", "a", 3000, 0)},
 			Slices: []*discoveryv1.EndpointSlice{
 				slice("games", "a", endpointSpec{addr: "10.244.5.5", node: "node-b", target: "pod-a"}),
 			},
-			Now: metav1.NewTime(baseTime),
+			Links: []*v1alpha1.Link{claim("node-a", "node-b", 0)},
+			Now:   metav1.NewTime(baseTime),
 		}
 	}
 

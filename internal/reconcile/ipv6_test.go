@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
@@ -92,36 +91,36 @@ func TestDualStackRemoteSingle(t *testing.T) {
 		return dualStack(remoteWorld(n), endpointSpec{addr: pod5v6, node: "node-b", target: "pod-a"})
 	}
 
-	toB := linkName("public", "node-b")
+	toB := linkName(0)
 	gotA := Compute(world("node-a")).State
 	wantA := datapath.State{
 		DNAT: []datapath.DNATRule{
-			{Iface: "eth0", Port: tcp3000, ToAddr: netip.MustParseAddr("169.254.77.1")},
-			{Iface: "eth0", Port: tcp3000, ToAddr: netip.MustParseAddr("fd64:f5ac:e961::1")},
+			{Iface: "eth0", Port: tcp3000, ToAddr: netip.MustParseAddr("169.254.64.1")},
+			{Iface: "eth0", Port: tcp3000, ToAddr: netip.MustParseAddr("fd64:f5ac:e961::1:1")},
 		},
 		Exempt: []datapath.ExemptRule{
-			{OifName: toB, DstAddr: addrPtr("169.254.77.1"), Port: tcp3000},
-			{OifName: toB, DstAddr: addrPtr("fd64:f5ac:e961::1"), Port: tcp3000},
+			{OifName: toB, DstAddr: addrPtr("169.254.64.1"), Port: tcp3000},
+			{OifName: toB, DstAddr: addrPtr("fd64:f5ac:e961::1:1"), Port: tcp3000},
 		},
 		Links: []datapath.Link{{
-			Name: toB, VNI: 4242, Port: 4790,
+			Name: toB, VNI: 7000, Port: 4790,
 			LocalAddr:  netip.MustParseAddr("10.0.0.1"),
 			RemoteAddr: netip.MustParseAddr("10.0.0.2"),
-			LinkAddr:   netip.MustParsePrefix("169.254.77.0/31"),
-			LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::/127"),
+			LinkAddr:   netip.MustParsePrefix("169.254.64.0/31"),
+			LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::1:0/127"),
 		}},
 	}
 	if !reflect.DeepEqual(gotA, wantA) {
 		t.Errorf("node-a state =\n%+v\nwant\n%+v", gotA, wantA)
 	}
 
-	toA := linkName("public", "node-a")
+	toA := linkName(0)
 	guard := netip.MustParsePrefix("10.0.0.1/32")
 	gotB := Compute(world("node-b")).State
 	wantB := datapath.State{
 		DNAT: []datapath.DNATRule{
-			{Iface: toA, Port: tcp3000, ToAddr: netip.MustParseAddr("10.244.5.5"), DstAddr: addrPtr("169.254.77.1")},
-			{Iface: toA, Port: tcp3000, ToAddr: netip.MustParseAddr(pod5v6), DstAddr: addrPtr("fd64:f5ac:e961::1")},
+			{Iface: toA, Port: tcp3000, ToAddr: netip.MustParseAddr("10.244.5.5"), DstAddr: addrPtr("169.254.64.1")},
+			{Iface: toA, Port: tcp3000, ToAddr: netip.MustParseAddr(pod5v6), DstAddr: addrPtr("fd64:f5ac:e961::1:1")},
 		},
 		Exempt: []datapath.ExemptRule{
 			{OifName: "cilium_*", Negate: true, SrcAddr: addrPtr("10.244.5.5"), Port: tcp3000, PortIsSrc: true},
@@ -132,20 +131,20 @@ func TestDualStackRemoteSingle(t *testing.T) {
 			{SrcAddr: netip.MustParseAddr(pod5v6), Port: tcp3000, Mark: markBase},
 		},
 		Links: []datapath.Link{{
-			Name: toA, VNI: 4242, Port: 4790,
+			Name: toA, VNI: 7000, Port: 4790,
 			LocalAddr:  netip.MustParseAddr("10.0.0.2"),
 			RemoteAddr: netip.MustParseAddr("10.0.0.1"),
-			LinkAddr:   netip.MustParsePrefix("169.254.77.1/31"),
-			LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::1/127"),
+			LinkAddr:   netip.MustParsePrefix("169.254.64.1/31"),
+			LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::1:1/127"),
 		}},
 		Rules: []datapath.IPRule{
 			{Pref: 101, Mark: markBase, To: &guard, Table: 254},
-			{Pref: 102, Mark: markBase, Table: 200},
-			{Pref: 102, Mark: markBase, Table: 200, Family: datapath.FamilyIPv6},
+			{Pref: 102, Mark: markBase, Table: 1000},
+			{Pref: 102, Mark: markBase, Table: 1000, Family: datapath.FamilyIPv6},
 		},
 		Routes: []datapath.Route{
-			{Table: 200, Via: netip.MustParseAddr("169.254.77.0"), Dev: toA},
-			{Table: 200, Via: netip.MustParseAddr("fd64:f5ac:e961::"), Dev: toA},
+			{Table: 1000, Via: netip.MustParseAddr("169.254.64.0"), Dev: toA},
+			{Table: 1000, Via: netip.MustParseAddr("fd64:f5ac:e961::1:0"), Dev: toA},
 		},
 	}
 	if !reflect.DeepEqual(gotB, wantB) {
@@ -197,7 +196,7 @@ func TestDualStackMulti(t *testing.T) {
 
 	// An accepting node holding no pod forwards each family over its link.
 	a := Compute(dualStack(multiWorld("node-a"), endpointSpec{addr: pod9v6, node: "node-c", target: "pod-a"})).State
-	if len(a.DNAT) != 2 || a.DNAT[1].ToAddr.String() != "fd64:f5ac:e961::1" {
+	if len(a.DNAT) != 2 || a.DNAT[1].ToAddr.String() != "fd64:f5ac:e961::1:1" {
 		t.Errorf("node-a DNAT = %+v, want ipv4 and ipv6 to node-c's ends of slot 0", a.DNAT)
 	}
 }
@@ -300,10 +299,11 @@ func TestNodeRowCarriesIPv6Addresses(t *testing.T) {
 	}
 }
 
-// TestLinkSlash127FollowsTheSlot: slot n takes the nth /127 of subnet6, and the
-// node whose name sorts first takes the low address, the way the /31 splits.
+// TestLinkSlash127FollowsTheSlot: slot n gets the nth /127 of the pool's IPv6
+// subnet, and the node whose name sorts first gets the low address, the way
+// the /31 splits. A class's deprecated subnet6 changes nothing.
 func TestLinkSlash127FollowsTheSlot(t *testing.T) {
-	links := []v1alpha1.LinkAllocation{claim("node-a", "node-b", 7)}
+	links := []*v1alpha1.Link{claim("node-a", "node-b", 7)}
 	world := func(n string, opts ...classOpt) Inputs {
 		in := linkWorld(n, links, opts...)
 		return dualStack(in, endpointSpec{addr: pod5v6, node: "node-b", target: "pod-a"})
@@ -314,17 +314,16 @@ func TestLinkSlash127FollowsTheSlot(t *testing.T) {
 	if len(a) != 1 || len(b) != 1 {
 		t.Fatalf("links = %+v / %+v, want one on each end", a, b)
 	}
-	if got := a[0].LinkAddr6.String(); got != "fd64:f5ac:e961::e/127" {
-		t.Errorf("node-a /127 = %s, want fd64:f5ac:e961::e/127 (slot 7, lower name)", got)
+	if got := a[0].LinkAddr6.String(); got != "fd64:f5ac:e961::1:e/127" {
+		t.Errorf("node-a /127 = %s, want fd64:f5ac:e961::1:e/127 (slot 7, lower name)", got)
 	}
-	if got := b[0].LinkAddr6.String(); got != "fd64:f5ac:e961::f/127" {
-		t.Errorf("node-b /127 = %s, want fd64:f5ac:e961::f/127 (slot 7, higher name)", got)
+	if got := b[0].LinkAddr6.String(); got != "fd64:f5ac:e961::1:f/127" {
+		t.Errorf("node-b /127 = %s, want fd64:f5ac:e961::1:f/127 (slot 7, higher name)", got)
 	}
 
-	// A class's own subnet6 is used, masked to its prefix the way subnet is.
 	c := Compute(world("node-b", withSubnet6("fd12:3456:789a:1::ff05/120"))).State.Links
-	if len(c) != 1 || c[0].LinkAddr6.String() != "fd12:3456:789a:1::ff0f/127" {
-		t.Errorf("links = %+v, want node-b at fd12:3456:789a:1::ff0f/127", c)
+	if len(c) != 1 || c[0].LinkAddr6.String() != "fd64:f5ac:e961::1:f/127" {
+		t.Errorf("links = %+v, want node-b at fd64:f5ac:e961::1:f/127 whatever subnet6 says", c)
 	}
 }
 
@@ -357,21 +356,6 @@ func TestLinkBelowIPv6MinimumCarriesNoIPv6(t *testing.T) {
 				t.Errorf("node-a: ipv6 DNAT %+v toward a link that cannot carry ipv6", d)
 			}
 		}
-	}
-}
-
-// TestInvalidSubnet6: a subnet6 the API should have refused leaves IPv4 as it
-// is and the class Ready=False naming the field.
-func TestInvalidSubnet6(t *testing.T) {
-	in := dualStack(remoteWorld("node-a", withSubnet6("169.254.0.0/16")),
-		endpointSpec{addr: pod5v6, node: "node-b", target: "pod-a"})
-	res := Compute(in)
-	if len(res.State.Links) != 1 || res.State.Links[0].LinkAddr6.IsValid() {
-		t.Errorf("links = %+v, want the ipv4 link alone", res.State.Links)
-	}
-	cond := findCond(res.ClassStatus["public"].Conditions, v1alpha1.ConditionReady)
-	if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonInvalidSubnet {
-		t.Errorf("Ready = %s/%s, want False/InvalidSubnet", cond.Status, cond.Reason)
 	}
 }
 

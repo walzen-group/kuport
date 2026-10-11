@@ -2,8 +2,8 @@ package reconcile
 
 import (
 	"fmt"
-	"net/netip"
 	"sort"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -11,97 +11,58 @@ import (
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
 )
 
-// buildClassStatus fills in this node's contribution to every class it
-// participates in: its own Nodes row, the link claims it proposes or garbage
-// collects, and the class-level conditions. A class participates when it selects
-// this node. The row carries a real readiness verdict: every interface the class
-// selects must resolve to an address on this node, and the first that does not
-// is named in the row's message rather than silently dropped.
-func buildClassStatus(res *Result, in Inputs, idx *index, mappings []*mapping, alloc map[string]classAlloc, needed map[string]map[string]neededPair) {
+// buildClassStatus fills in this node's contribution to every class that
+// accepts on it: its own Nodes row and the class-level conditions. The row
+// carries a real readiness verdict: every interface the class selects must
+// resolve to an address on this node, and the first that does not is named in
+// the row's message rather than silently dropped.
+func buildClassStatus(res *Result, in Inputs, idx *index, alloc linkAlloc) {
 	for _, class := range in.Classes {
-		accepting := idx.acceptingNodesFor(class)
-		isAccepting := contains(accepting, in.NodeName)
-		isHolder := holdsEndpointFor(needed[class.Name], in.NodeName)
-		// A node contributes to a class it either accepts for (its Nodes row, GC
-		// and conditions) or holds a return-link endpoint for (a fresh claim,
-		// the same single-writer rule that governs PortMap status).
-		if !isAccepting && !isHolder {
+		if !contains(idx.acceptingNodesFor(class), in.NodeName) {
 			continue
 		}
-
-		a := alloc[class.Name]
-		c := ClassContribution{}
-
-		if isAccepting {
-			c.Node = nodeRowFor(in, class)
-			// GC: any selecting agent clears, sets or drops UnusedSince.
-			updates, drops := gcClaims(class, needed[class.Name], in.Now)
-			c.ClaimLinks = append(c.ClaimLinks, updates...)
-			c.DropLinks = append(c.DropLinks, drops...)
-			c.Conditions = classConditions(a, in.Now, class.Generation)
+		res.ClassStatus[class.Name] = ClassContribution{
+			Node:             nodeRowFor(in, class),
+			Conditions:       classConditions(class, alloc, in.Now),
+			ClearLegacyLinks: len(class.Status.Links) > 0,
 		}
-
-		// New claims: only the endpoint holder proposes one, and only for a pair
-		// that has no existing claim.
-		for key, slot := range a.newly {
-			np := a.needed[key]
-			if !np.holders[in.NodeName] {
-				continue
-			}
-			lo, _ := nthSlash31(a.subnet, slot)
-			c.ClaimLinks = append(c.ClaimLinks, v1alpha1.LinkAllocation{
-				Key:    key,
-				Peers:  []string{np.peers[0], np.peers[1]},
-				Subnet: netip.PrefixFrom(lo, 31).String(),
-				Slot:   int32(slot),
-			})
-		}
-
-		sort.Slice(c.ClaimLinks, func(i, j int) bool { return c.ClaimLinks[i].Key < c.ClaimLinks[j].Key })
-		sort.Strings(c.DropLinks)
-
-		res.ClassStatus[class.Name] = c
 	}
 }
 
-// holdsEndpointFor reports whether the node holds a chosen endpoint on any of a
-// class's needed return-link pairs.
-func holdsEndpointFor(needed map[string]neededPair, nodeName string) bool {
-	for _, np := range needed {
-		if np.holders[nodeName] {
-			return true
-		}
-	}
-	return false
-}
-
-// classConditions reports a class's Ready condition: false when its subnet fails
-// to parse or runs out of slots, true otherwise.
-func classConditions(a classAlloc, now metav1.Time, generation int64) []metav1.Condition {
-	cond := metav1.Condition{
+// classConditions reports a class's Ready condition, false when the link pool
+// has no slot left for one of its pairs, and its Deprecated condition, true
+// when it sets a returnPath.vxlan field kuport ignores.
+func classConditions(class *v1alpha1.PortMapClass, alloc linkAlloc, now metav1.Time) []metav1.Condition {
+	ready := metav1.Condition{
 		Type:               v1alpha1.ConditionReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             v1alpha1.ReasonValid,
 		LastTransitionTime: now,
-		ObservedGeneration: generation,
+		ObservedGeneration: class.Generation,
 	}
-	switch {
-	case a.invalidSubnet:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = v1alpha1.ReasonInvalidSubnet
-		cond.Message = "return-path subnet cannot be parsed as an IPv4 CIDR"
-	case a.exhausted:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = v1alpha1.ReasonSubnetExhausted
-		cond.Message = "no free /31 slot remains in the return-path subnet"
-	case a.invalidSubnet6:
-		// The CRD's validation refuses this, so it is reached only by a class
-		// written past it. The links carry IPv4 alone meanwhile.
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = v1alpha1.ReasonInvalidSubnet
-		cond.Message = "return-path subnet6 is not an IPv6 CIDR holding a /127 for every /31 of subnet; the links carry IPv4 alone"
+	if alloc.exhausted[linkClass{kind: v1alpha1.ClassKindPortMapClass, name: class.Name}] {
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = v1alpha1.ReasonSubnetExhausted
+		ready.Message = fmt.Sprintf("all %d slots of the cluster-wide link pool are taken", linkSlots)
 	}
-	return []metav1.Condition{cond}
+
+	deprecated := metav1.Condition{
+		Type:               v1alpha1.ConditionDeprecated,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonNoDeprecated,
+		LastTransitionTime: now,
+		ObservedGeneration: class.Generation,
+	}
+	if fields := deprecatedVxlanFields(class); len(fields) > 0 {
+		deprecated.Status = metav1.ConditionTrue
+		deprecated.Reason = v1alpha1.ReasonDeprecatedField
+		deprecated.Message = fmt.Sprintf("%s set but ignored: every link takes its numbers from its Link object's slot; remove the fields",
+			strings.Join(fields, ", "))
+	}
+
+	conds := []metav1.Condition{deprecated, ready}
+	sortConditions(conds)
+	return conds
 }
 
 // ipv6ForwardingOff is the node row's ipv6Unavailable message on a host that

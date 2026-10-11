@@ -23,8 +23,9 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 		classes v1alpha1.PortMapClassList
 		pms     v1alpha1.PortMapList
 		slices  discoveryv1.EndpointSliceList
+		links   v1alpha1.LinkList
 	)
-	for _, list := range []client.ObjectList{&nodes, &nss, &classes, &pms, &slices} {
+	for _, list := range []client.ObjectList{&nodes, &nss, &classes, &pms, &slices, &links} {
 		if err := r.Client.List(ctx, list); err != nil {
 			return kreconcile.Inputs{}, err
 		}
@@ -33,6 +34,10 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	in := kreconcile.Inputs{
 		NodeName: r.NodeName,
 		Now:      r.now(),
+		LinkPort: r.linkPort(),
+	}
+	for i := range links.Items {
+		in.Links = append(in.Links, &links.Items[i])
 	}
 	for i := range nodes.Items {
 		in.Nodes = append(in.Nodes, &nodes.Items[i])
