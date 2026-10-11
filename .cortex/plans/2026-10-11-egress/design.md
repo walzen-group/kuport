@@ -353,17 +353,38 @@ sequenceDiagram
     Q-->>P: delivered
 ```
 
-### kup-steer needs `ct direction original`
+### Replies on a mapped port: tested before anything changes
 
 `masquerade` keeps the pod's source port when it is free on bar. A UDP flow
 qBittorrent opens from 40000 then leaves bar from 40000, and its replies arrive
 on ens3 with `udp dport 40000`. kup-steer, the chain qBittorrent's PortMap on
 `netcup-bar-w-1` puts on bar, matches `iifname "ens3" udp dport 40000` with no
-conntrack state and would rewrite their destination to a stand-in. Adding `ct
-direction original` to every kup-steer rule leaves a client's packets untouched,
-since a client always sends in the original direction, and skips the replies to
-an egress flow. kup-pre is a nat chain and sees only a flow's first packet, so
-it needs no change.
+conntrack state, so it rewrites those replies' destination to a stand-in.
+
+Whether that breaks the reply is not known. Conntrack has matched the reply to
+the egress flow at -200, before kup-steer runs, and the nat hook at -100 writes
+the destination from the conntrack tuple, which is the pod's address. If it
+overwrites the stand-in, the reply arrives and kup-steer needs no change. The
+same question exists today without an Egress: a pod on its PortMap's accepting
+node that opens a flow from its mapped port leaves through Cilium's masquerade
+with that port, and its replies meet kup-steer the same way.
+
+kup-steer stays as it is, and a kernel test decides:
+
+- In internal/datapath/firewall_kernel_test.go, beside
+  `TestDeliversThroughHostFirewallOnRealKernel` and in the same three
+  namespaces with the same copy of Talos's firewall chain, the pod opens a flow
+  to the client namespace from its mapped UDP port and from its mapped TCP port,
+  in IPv4 and IPv6. The node loads the mapping's kup-steer and kup-pre rules
+  for those ports and masquerades the pod's flow out the uplink, so the reply
+  arrives with the mapped port as its destination port.
+- The test asserts that the client sees the node's uplink address as the
+  source and that the pod receives every reply.
+
+If the test passes, kup-steer is unchanged and docs/datapath.md records the
+measurement. If it fails, the test keeps `nft monitor trace` output for the
+dropped reply, and the narrowest fix the trace points at goes into this spec
+and docs/datapath.md with that trace, before the Egress code depends on it.
 
 ## MSS clamping
 
@@ -480,9 +501,12 @@ the route the packets take and leaves policy to Cilium.
 
 ## Part 2
 
+- Kernel, first: the reply to a pod's flow masqueraded from its mapped port
+  reaches the pod through kup-steer, as "Replies on a mapped port" describes.
+  Its result decides whether kup-steer changes.
 - Goldens: kup-egress in both families with the Link and Blocked forms and the
   empty Direct form, the kup-cluster sets, the egress node's ct save, ct load
-  and masquerade rules, kup-mss, and kup-steer with `ct direction original`.
+  and masquerade rules, and kup-mss.
 - Reconcile: a pod on `spec.node` yields no rules and path Local; a missing
   Link yields Blocked under `failClosed: true` and Direct under false; flipping
   `failClosed` swaps the rule on the next pass; changing `spec.node` moves the
