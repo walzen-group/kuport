@@ -29,8 +29,9 @@ const (
 	// vniBase is the VNI of slot 0.
 	vniBase = 7000
 	// tableBase is the routing table of slot 0. Tables 253 to 255 belong to
-	// the kernel, and the old per-class tables ran from 200.
-	tableBase = 1000
+	// the kernel, Cilium routes through 2004 and 2005 and netbird through
+	// 7120, and the old per-class tables ran from 200.
+	tableBase = 10000
 	// defaultLinkPort is the links' UDP port when the agent sets none.
 	defaultLinkPort = 4790
 	// unusedLinkAge is how long a Link may sit unused before any agent
@@ -55,6 +56,15 @@ const ipv6MinMTU = 1280
 // markBase is OR'd with a slot to form the packet mark that keeps a return
 // diversion narrow. The high bits spell "kp".
 const markBase uint32 = 0x6b700000
+
+// linkMark is the packet mark of the link at a slot. Cilium matches its own
+// marks under the mask 0xf00, and its rule at pref 9 sends mark&0xf00 == 0x200
+// to its proxy table, so a link's mark leaves those four bits clear: the slot's
+// low eight bits stay in the low byte and the next two move to bits 12 and 13.
+func linkMark(slot int) uint32 {
+	s := uint32(slot)
+	return markBase | s&0xff | (s>>8)<<12
+}
 
 // linkClass names the class a link belongs to.
 type linkClass struct {
@@ -359,7 +369,7 @@ func buildLinkParams(idx *index, underlay func(node string) int, thisNode, peer 
 		peerEnd:    peerEnd,
 		linkAddr:   netip.PrefixFrom(thisEnd, 31),
 		peerNode32: netip.PrefixFrom(remote, 32),
-		mark:       markBase | uint32(slot),
+		mark:       linkMark(slot),
 		table:      tableBase + uint32(slot),
 		vni:        vniBase + uint32(slot),
 		port:       port,

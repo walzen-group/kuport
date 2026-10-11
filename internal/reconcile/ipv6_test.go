@@ -139,12 +139,12 @@ func TestDualStackRemoteSingle(t *testing.T) {
 		}},
 		Rules: []datapath.IPRule{
 			{Pref: 101, Mark: markBase, To: &guard, Table: 254},
-			{Pref: 102, Mark: markBase, Table: 1000},
-			{Pref: 102, Mark: markBase, Table: 1000, Family: datapath.FamilyIPv6},
+			{Pref: 102, Mark: markBase, Table: 10000},
+			{Pref: 102, Mark: markBase, Table: 10000, Family: datapath.FamilyIPv6},
 		},
 		Routes: []datapath.Route{
-			{Table: 1000, Via: netip.MustParseAddr("169.254.64.0"), Dev: toA},
-			{Table: 1000, Via: netip.MustParseAddr("fd64:f5ac:e961::1:0"), Dev: toA},
+			{Table: 10000, Via: netip.MustParseAddr("169.254.64.0"), Dev: toA},
+			{Table: 10000, Via: netip.MustParseAddr("fd64:f5ac:e961::1:0"), Dev: toA},
 		},
 	}
 	if !reflect.DeepEqual(gotB, wantB) {

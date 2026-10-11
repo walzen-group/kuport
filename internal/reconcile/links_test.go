@@ -105,7 +105,7 @@ func TestLinkAllocation(t *testing.T) {
 		}
 		wantRules := []datapath.IPRule{
 			{Pref: 101, Mark: 0x6b700007, To: prefixPtr("10.0.0.1/32"), Table: 254},
-			{Pref: 102, Mark: 0x6b700007, Table: 1007},
+			{Pref: 102, Mark: 0x6b700007, Table: 10007},
 		}
 		if fmt.Sprint(res.State.Rules) != fmt.Sprint(wantRules) {
 			t.Errorf("rules = %v, want %v", res.State.Rules, wantRules)
@@ -140,8 +140,8 @@ func TestLinkAllocation(t *testing.T) {
 		for _, r := range res.State.Routes {
 			tables[r.Table] = true
 		}
-		if !tables[1000] || !tables[1001] || len(tables) != 2 {
-			t.Errorf("route tables = %v, want 1000 and 1001", tables)
+		if !tables[10000] || !tables[10001] || len(tables) != 2 {
+			t.Errorf("route tables = %v, want 10000 and 10001", tables)
 		}
 	})
 
@@ -151,9 +151,28 @@ func TestLinkAllocation(t *testing.T) {
 			if r.Table >= 253 && r.Table <= 255 {
 				t.Errorf("slot 53 routes in table %d, one of the kernel's", r.Table)
 			}
-			if r.Table != 1053 {
-				t.Errorf("table = %d, want 1053", r.Table)
+			if r.Table != 10053 {
+				t.Errorf("table = %d, want 10053", r.Table)
 			}
+		}
+	})
+
+	t.Run("no slot's mark or table lands on Cilium's", func(t *testing.T) {
+		// Cilium's rule 9 sends mark&0xf00 == 0x200 to its proxy table 2004.
+		for slot := 0; slot < linkSlots; slot++ {
+			if m := linkMark(slot); m&0xf00 != 0 {
+				t.Fatalf("slot %d: mark %#x sets bits Cilium's rule 9 matches under 0xf00", slot, m)
+			}
+			if tb := tableBase + uint32(slot); tb == 2004 || tb == 2005 {
+				t.Fatalf("slot %d: table %d is one of Cilium's proxy tables", slot, tb)
+			}
+		}
+		seen := map[uint32]int{}
+		for slot := 0; slot < linkSlots; slot++ {
+			if prev, dup := seen[linkMark(slot)]; dup {
+				t.Fatalf("slots %d and %d share mark %#x", prev, slot, linkMark(slot))
+			}
+			seen[linkMark(slot)] = slot
 		}
 	})
 
