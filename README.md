@@ -29,6 +29,11 @@ An admin defines a PortMapClass naming the accepting nodes, their interfaces and
 the port range. A workload asks for a port on that class. An agent on each node
 programs nftables and routes to make it so, and follows the pod when it moves.
 
+The outbound side works the same way. An admin defines an EgressClass naming
+one node, and a workload's Egress selects its pods by label. The connections
+those pods open toward the internet then leave the cluster from that node's
+address, while traffic to the cluster, the LAN and mesh peers keeps its route.
+
 ## Status
 
 kuport has run on the maintainers' test and production clusters since
@@ -41,6 +46,8 @@ GitHub Actions runs the unit, golden and envtest suites on every push. The
 end-to-end tier runs by hand against the test cluster, as
 [docs/development.md](docs/development.md) describes. IPv6 delivery is new in
 v0.6.0 (released 2026-10-01), and no PortMap on either cluster uses it yet.
+Egress is newer still: a kernel test carries its traffic through network
+namespaces, without Cilium or netbird in them.
 
 Every cluster kuport has run on shares that one design. On a cluster built
 differently, install on a staging cluster first and walk
@@ -50,12 +57,12 @@ differently, install on a staging cluster first and walk
 
 - [docs/overview.md](docs/overview.md): the problem, the goals, and what a
   cluster has to provide.
-- [docs/api.md](docs/api.md): the three kinds field by field, what status
+- [docs/api.md](docs/api.md): the five kinds field by field, what status
   reports, and the agent's flags.
 - [docs/datapath.md](docs/datapath.md): the packet's path, every rule on it
   with the measurement that confirmed it, and the serving modes.
-- [docs/troubleshooting.md](docs/troubleshooting.md): a mapping is not working,
-  and what every condition reason means.
+- [docs/troubleshooting.md](docs/troubleshooting.md): a mapping or an Egress is
+  not working, and what every condition reason means.
 - [docs/integration.md](docs/integration.md): installing kuport into a specific
   cluster, written for whoever does the installing.
 

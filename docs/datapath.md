@@ -124,7 +124,10 @@ table inet kuport {
 
 The `ip6` lines exist only for a mapping delivered over IPv6, which
 [IPv6](#ipv6) covers. kup-steer and the maps carry a mapping past a host
-firewall; [Host firewall](#host-firewall) walks a packet through them.
+firewall; [Host firewall](#host-firewall) walks a packet through them. The table
+also holds the chains kup-egress and kup-mss on every node, which
+[Egress](#egress) and [MSS clamping](#mss-clamping) cover; the listings here
+leave them out.
 
 `<target>` is the pod's address when the pod is on this node, and the far end of
 this node's link to the pod's node when it is not. `<egress dev>` follows it:
@@ -311,7 +314,9 @@ netbird's rules, and the current release answers in all three passes.
 everything without its mark to its own table, and pref 105 resolves the
 destination out of the main table before that. A return rule at 32001 never
 fires; the reply has already left. The rules go above 105 and below the local
-table at 100.
+table at 100. An Egress's rules on the pod's node sit after netbird's, at 32763
+to 32765, because they must not override a mesh route;
+[Routing rule order](#routing-rule-order) has the full ladder.
 
 **The first rule prevents a routing loop.** The VXLAN driver copies the packet's
 mark onto the encapsulated packet, whose destination is the peer's address. That
@@ -461,6 +466,13 @@ table inet kuport {
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
 	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
 }
 ```
 
@@ -496,6 +508,13 @@ table inet kuport {
 		ip saddr 10.244.5.5 tcp sport 3000 counter meta mark set 0x6b700000
 		ip6 saddr fd00:10:244:5::5 tcp sport 3000 counter meta mark set 0x6b700000
 	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
 }
 ```
 
@@ -512,6 +531,10 @@ either family back over kup-0:
 | IPv6 rule, pref 102 | fwmark 0x6b700000 lookup 10000 |
 | table 10000, IPv4 | default via 169.254.64.0 dev kup-0 |
 | table 10000, IPv6 | default via fd64:f5ac:e961::1:0 dev kup-0 |
+
+kup-egress stays empty on both nodes because no Egress selects the pod.
+kup-mss holds its clamp on both, since each node holds a link; a node with no
+link has an empty kup-mss. [MSS clamping](#mss-clamping) explains the rule.
 
 The golden rulesets in `internal/datapath/testdata/` named `*-dual-stack` pin
 the same rule shapes, `Multi` included.
@@ -704,6 +727,278 @@ ReturnPathUnavailable. Under `Vxlan` the same rescheduling builds a link and the
 mapping keeps working, which is the answer a class wants when pod placement is
 free.
 
+## Egress
+
+An [Egress](api.md#egress) sends what a selected pod opens toward the default
+route out of its class's egress node. The pod's node marks the pod's outbound
+connections and routes them into a link to the egress node, and the egress node
+masquerades them to its own address. Every other pod keeps leaving through the
+CNI's masquerade on its own node, and so does a selected pod's traffic to any
+destination with a more specific route.
+
+One connection, with the pod at 10.244.18.107 on worker-b, edge-a as the egress
+node with its uplink at 203.0.113.9, a site at 198.51.100.50, and the pair's
+Link at slot 3:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Pod 10.244.18.107
+    participant W as Pod's node worker-b
+    participant E as Egress node edge-a
+    participant S as Site 198.51.100.50
+    P->>W: SYN 10.244.18.107:51234 to 198.51.100.50:443
+    Note over W: kup-egress marks it 0x6b700003. Main has no route for the site more specific than its default, so pref 32765 looks up table 10003
+    W->>E: over kup-3, source still 10.244.18.107, MSS clamped by kup-mss
+    Note over E: kup-mangle writes 0x6b700003 into the flow's conntrack entry, kup-post masquerades
+    E->>S: SYN 203.0.113.9:51234 to 198.51.100.50:443
+    S-->>E: SYN-ACK to 203.0.113.9:51234
+    Note over E: kup-mangle copies the conntrack mark onto the packet, the nat hook writes 10.244.18.107 back as its destination, pref 102 looks up table 10003
+    E-->>W: over kup-3, MSS clamped by kup-mss
+    W-->>P: delivered
+```
+
+### Rules on the pod's node
+
+The golden ruleset egress-pod-node.golden in `internal/datapath/testdata/`
+renders a pod's node holding two selected pods. 10.244.18.107, with
+fd00:10:244:12::6b, leaves over kup-3 in both families. 10.244.18.9 belongs to
+an Egress with `failClosed: true` whose path is down. The cluster's pod CIDRs
+10.244.18.0/24 and 10.244.19.0/24 merge into one range, beside the nodes'
+InternalIPs 100.64.0.2 and 203.0.113.9:
+
+```
+table inet kuport {
+	set kup-cluster4 {
+		type ipv4_addr
+		flags interval
+		elements = { 10.244.18.0/23, 100.64.0.2, 203.0.113.9 }
+	}
+	set kup-cluster6 {
+		type ipv6_addr
+		flags interval
+		elements = { fd00:10:244:12::/64 }
+	}
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname "kup-3" ip saddr 10.244.18.107 counter snat ip to ip saddr
+		oifname "kup-3" ip6 saddr fd00:10:244:12::6b counter snat ip6 to ip6 saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+		ip saddr 10.244.18.107 ip daddr != @kup-cluster4 ct direction original counter meta mark set 0x6b700003
+		ip saddr 10.244.18.9 ip daddr != @kup-cluster4 ct direction original counter meta mark set 0x6b70f000
+		ip6 saddr fd00:10:244:12::6b ip6 daddr != @kup-cluster6 ct direction original counter meta mark set 0x6b700003
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
+}
+```
+
+The same fixture's routing objects, with edge-a at 203.0.113.9 holding the
+low end of slot 3:
+
+| Object | Value | Family |
+| --- | --- | --- |
+| rule, pref 32763 | fwmark 0x6b700003 to 203.0.113.9/32 lookup main | IPv4 |
+| rule, pref 32764 | fwmark 0x6b700003 lookup main suppress_prefixlength 0 | IPv4 and IPv6 |
+| rule, pref 32765 | fwmark 0x6b700003 lookup 10003 | IPv4 and IPv6 |
+| rule, pref 32764 | fwmark 0x6b70f000 lookup main suppress_prefixlength 0 | IPv4 |
+| rule, pref 32765 | fwmark 0x6b70f000 lookup 11024 | IPv4 |
+| table 10003 | default via 169.254.64.6 dev kup-3, default via fd64:f5ac:e961::1:6 dev kup-3 | IPv4, IPv6 |
+| table 11024 | blackhole default | IPv4 |
+
+kup-egress runs at `dstnat + 10`, priority -90. kube-proxy translates a
+ClusterIP in nat prerouting at -100, so by -90 a DNS query to the CoreDNS
+ClusterIP carries the CoreDNS pod's address, which kup-cluster4 contains. At
+kup-mangle's `mangle + 10` the destination is still the ClusterIP, which no pod
+CIDR contains, and the query would go to the egress node. The kernel routes
+after the whole prerouting hook, so a mark set at -90 still selects the routing
+rules. With Cilium's socket load balancer in place of kube-proxy, a ClusterIP
+never reaches netfilter at all.
+
+`ct direction original` keeps the mark to connections the pod opened. A reply
+to a client that reached the pod through a PortMap travels in the reply
+direction and keeps the PortMap's path.
+
+kup-cluster4 and kup-cluster6 hold every Node's `spec.podCIDRs` and its
+InternalIP addresses, so a flow to another pod or to a node never gets the
+mark. Cilium sets marks of its own on in-cluster flows.
+[decisions.md](decisions.md#cluster-destinations-stay-unmarked) has the
+reasoning. A Node without `spec.podCIDRs` leaves the set incomplete, so the
+agents program no Egress path at all and report `PodCIDRsUnknown`.
+
+The kup-post rule claims the flow before the CNI's masquerade, the way the
+reply rule of a PortMap does, so the pod's address reaches the egress node
+unchanged.
+
+A pod whose path is down under `failClosed: true` gets the mark 0x6b70f000,
+which every blocked pod on the node shares. Its rules send default-route traffic
+to table 11024, which holds only `blackhole default`; a destination with a more
+specific route still answers at pref 32764. A pod whose path is down under
+`failClosed: false` gets no rule and leaves through the CNI's masquerade on its
+own node. A pod running on the egress node itself gets no rule either: its path
+is Local, and the CNI's masquerade there writes the egress node's address.
+
+### Routing rule order
+
+The Egress rules on the pod's node sit after every other policy rule. On a node
+running Cilium and netbird, `ip rule` holds this ladder:
+
+| Pref | Owner | Rule |
+| --- | --- | --- |
+| 9 | Cilium | marks with `mark & 0xf00 == 0x200` to its proxy table 2004 |
+| 100 | the kernel, moved there by Cilium | lookup local |
+| 101, 102 | kuport | a PortMap's return path, and the egress node's replies below |
+| 105 | netbird | lookup main suppress_prefixlength 0 |
+| 110 | netbird | everything without netbird's mark to its table 7120 |
+| 32763 | kuport | Egress loop guard: the link's mark to the egress node's /32, lookup main |
+| 32764 | kuport | the Egress mark: lookup main suppress_prefixlength 0 |
+| 32765 | kuport | the Egress mark: lookup the link's table, or 11024 while blocked |
+| 32766 | the kernel | lookup main |
+| 32767 | the kernel | lookup default |
+
+`suppress_prefixlength 0` makes a lookup ignore a route whose prefix is /0. A
+marked packet to another pod's CIDR, a LAN address or the mesh's range finds
+that route in main at 105 or 32764 and leaves by it. A packet to a netbird peer
+or a network netbird routes finds its route in table 7120 at 110. Only a packet
+whose one route is main's default reaches 32765. The order holds on a node
+without netbird too, where 32764 answers what 105 would have.
+
+A netbird exit node installs a default route in table 7120. That route answers
+at pref 110, before 32765, and the selected pod's traffic then leaves through
+the exit node.
+
+The loop guard at 32763 serves the purpose pref 101 serves for a PortMap: the
+VXLAN driver copies the mark onto the outer packet, whose destination is the
+egress node's own address, and 32763 sends that packet through main.
+
+[decisions.md](decisions.md#egress-routes-after-the-other-policy-rules) records
+why the rules moved from 101 and 102 to the end of the ladder.
+
+### Rules on the egress node
+
+egress-gateway.golden renders edge-a, the egress node at 203.0.113.9, with links
+from two pod nodes: kup-3 to 100.64.0.2 and kup-4 to 100.64.0.3.
+
+```
+table inet kuport {
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		iifname "kup-3" ct direction original counter masquerade
+		iifname "kup-4" ct direction original counter masquerade
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+		ct direction reply ct mark 0x6b700003 counter meta mark set ct mark
+		ct direction reply ct mark 0x6b700004 counter meta mark set ct mark
+		iifname "kup-3" counter ct mark set 0x6b700003
+		iifname "kup-4" counter ct mark set 0x6b700004
+	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
+}
+```
+
+| Object | Value |
+| --- | --- |
+| rule, pref 101 | fwmark 0x6b700003 to 100.64.0.2/32 lookup main |
+| rule, pref 102 | fwmark 0x6b700003 lookup 10003 |
+| table 10003 | default via 169.254.64.7 dev kup-3 |
+| rule, pref 101 | fwmark 0x6b700004 to 100.64.0.3/32 lookup main |
+| rule, pref 102 | fwmark 0x6b700004 lookup 10004 |
+| table 10004 | default via 169.254.64.9 dev kup-4 |
+
+A packet arriving on kup-3 writes the link's mark into its conntrack entry and
+keeps a packet mark of 0, so main routes it out of the egress node's uplink,
+where kup-post masquerades it. A reply arriving on the uplink restores the mark
+from conntrack at `mangle + 10`. The nat hook at -100 then writes the pod's
+address back as its destination, and pref 102 routes it into kup-3. Main on the
+egress node holds a route for the pod's CIDR that is more specific than any
+default, so the reply has to be diverted at 102, ahead of main, to come back
+through the link the request used. A link carrying IPv6 adds the IPv6 pref 102
+rule and route.
+
+The masquerade matches only the arrival device, because the pod's node marks
+only the pods an Egress selects. A reply to a PortMap request arriving on the
+uplink has a conntrack mark of 0 and keeps its own path. The egress node writes
+these rules only while an Egress selects a pod on the link's other node.
+
+### Replies on a mapped port
+
+`masquerade` keeps the pod's source port when that port is free on the egress
+node. A UDP flow the pod opens from its mapped port 40000 then leaves the egress
+node from 40000, and when the egress node also accepts that pod's PortMap,
+kup-steer matches the reply arriving on the uplink with `udp dport 40000`.
+`TestEgressOnRealKernel` sends that flow, and the reply reaches the pod:
+conntrack matched it to the outbound flow before kup-steer ran, and the nat
+hook writes the destination from the conntrack tuple. kup-steer has no change
+for Egress.
+
+### When the path is down
+
+The pod's node decides each selected pod's path from inputs every agent shares,
+so the egress node writes the same path into the Egress status that the pod's
+node programmed.
+
+| Inputs | Path |
+| --- | --- |
+| the pod runs on the egress node | Local |
+| the pair's Link exists, the EgressClass has ready rows from the egress node and the pod's node, and neither Node's Ready condition is False or Unknown | Link |
+| no Link yet, a row missing or not ready, or a Node not ready | down |
+| the pod has an IPv6 address and the link carries no IPv6, or either node does not forward IPv6 | IPv6 down, IPv4 decided by the rows above |
+| a Node has no `spec.podCIDRs` | down |
+| a later Egress selects the pod too | the earlier Egress decides, its `failClosed` included |
+
+Down means Blocked under `failClosed: true` and Direct under `failClosed: false`.
+
+What a pod with `failClosed: true` sees when something on its path fails:
+
+| Event | Effect |
+| --- | --- |
+| egress node powered off | its class row stays, but the node controller sets its Node's Ready condition to Unknown about 40 seconds after the kubelet stops reporting. Until then the link sends to a node that is down and the packets are lost; from then the path is down: Blocked here, Direct under `failClosed: false` |
+| egress node's agent restarts | its shutdown removes the link and the masquerade. VXLAN packets from the pod's node reach no device and are dropped until the next agent's first pass |
+| pod node's agent shuts down cleanly | the agent applies a keep state in place of its teardown: every fail-closed pod on the node marked 0x6b70f000, the blocked rules, the blackhole and the cluster sets. The next agent's first pass rewrites the table whole |
+| pod node's agent crashes | the rules stay, as every other rule does |
+| the Egress is deleted | the next pass removes its rules, and the pod leaves from its own node |
+| a new pod starts, or the pod's node reboots | the pod sends from the moment its sandbox has an address. Until the agent's Pod watch delivers that address and the next pass runs, no rule matches the pod and it leaves from its own node. A reboot clears every nftables rule, so after one this applies to every selected pod on the node |
+
+The last row is a window kuport does not close. Nobody has measured the gap
+between a sandbox getting its address and the agent's next pass.
+
+Under `failClosed: false` every event in the table sends the pod's traffic out
+of its own node until the path is back.
+
+`TestEgressOnRealKernel` in internal/datapath carries traffic through four
+network namespaces standing in for the pod, the pod's node, the egress node and
+a site. It checks that UDP and TCP leave from the egress node in both families,
+that a destination with a more specific route and a cluster destination keep
+their path, that a blocked pod's default-route traffic is dropped while its
+cluster traffic still arrives, and that a Direct pod leaves from its own node.
+Its namespaces run neither Cilium nor netbird.
+
 ## MTU
 
 Each link is created and kept at the smaller of its two ends' underlays less the
@@ -721,3 +1016,28 @@ far side reassembles, measured on 2026-09-08 at reply sizes up to 1576 bytes, an
 a sender that set DF receives an ICMP carrying the correct MTU rather than
 silence. [Reading the numbers](troubleshooting.md#mtu) covers what an operator
 does with them.
+
+## MSS clamping
+
+A pod's interface carries the underlay's MTU, 1350 on the cluster this was
+designed against, while the link carries 1300. A TCP connection through a link
+would offer an MSS the link cannot carry. Every node holding a link clamps the
+MSS of a SYN leaving by one:
+
+```
+chain kup-mss {
+	type filter hook forward priority mangle; policy accept;
+	oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+}
+```
+
+`rt mtu` is the MTU of the route the packet leaves by, so the rule writes the link's
+figure less the IP and TCP headers. Under an Egress the pod's node clamps the
+pod's SYN and the egress node clamps the site's SYN-ACK. The rule matches every
+`kup-` device, so a PortMap's TCP flows through a link are clamped as well. A
+node with no link has an empty kup-mss.
+
+`TestEgressOnRealKernel` measured it over a 1300-byte link. TCP_MAXSEG at the
+site reads 1248 over IPv4 and 1228 over IPv6: 1260 and 1240 less the 12-byte
+timestamp option both ends negotiate. Unclamped, the pod's 1350 gives 1298 and
+1278.

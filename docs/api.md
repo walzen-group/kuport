@@ -1,8 +1,14 @@
 # API
 
-Group `kuport.wlz.li`, version `v1alpha1`. Three kinds: a class the admin
-writes, a mapping the workload writes, and the Link objects the agents write for
-their return links.
+Group `kuport.wlz.li`, version `v1alpha1`. Five kinds:
+
+| Kind | Scope | Written by | For |
+| --- | --- | --- | --- |
+| [PortMapClass](#portmapclass) | cluster | the admin | which nodes accept inbound traffic, on which interfaces and ports |
+| [PortMap](#portmap) | namespaced | the workload | one port delivered to the pod behind a Service |
+| [EgressClass](#egressclass) | cluster | the admin | the node whose address selected pods' outbound traffic leaves from |
+| [Egress](#egress) | namespaced | the workload | which pods in its namespace leave through that node |
+| [Link](#link) | cluster | the agents | one return link between two nodes, numbered from a cluster-wide pool |
 
 ## PortMapClass
 
@@ -300,6 +306,156 @@ when both legs moved onto kuport's own return link and the CNI's routing mode
 stopped deciding anything. `InvalidSubnet` went with the per-class subnets after
 v0.7.1.
 
+## EgressClass
+
+Cluster-scoped, short name `egc`. The admin writes it. It names the egress
+node: the node whose address the selected pods' outbound connections leave the
+cluster from.
+
+```yaml
+apiVersion: kuport.wlz.li/v1alpha1
+kind: EgressClass
+metadata:
+  name: edge-a
+spec:
+  node: edge-a
+  namespaceSelector:
+    matchLabels:
+      kuport.wlz.li/egress: allowed
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| node | string | The egress node. Required. Mutable: changing it moves every Egress of the class to the new node on the next pass. |
+| namespaceSelector | label selector | Which namespaces may reference this class. Empty selects every namespace. |
+
+An EgressClass sets no link numbers, interfaces or ports. Its links come from
+the [Link](#link) pool like a PortMapClass's, and the egress node's main
+routing table picks the interface the traffic leaves by.
+
+### EgressClass status
+
+```yaml
+status:
+  nodes:
+    - name: edge-a
+      ready: true
+      underlayMTU: 1400
+      linkMTU: 1350
+    - name: worker-b
+      ready: true
+      underlayMTU: 1350
+      linkMTU: 1300
+  observedGeneration: 1
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: Valid
+```
+
+Each node taking part writes its own `nodes` row: the egress node, and every
+node holding a pod one of the class's Egresses selects. The row carries the MTU
+figures the link is sized from, and `ipv6Unavailable` when the node does not
+forward IPv6. A pod's path waits for both rows, the egress node's and its own
+node's.
+
+| Condition | True when | Notable false reasons |
+| --- | --- | --- |
+| Ready | the link pool has a slot for every pair the class needs | `SubnetExhausted` |
+
+`kubectl get egressclass` prints NAME, NODE and AGE.
+
+## Egress
+
+Namespaced, short name `eg`. The workload writes it. It selects pods in its own
+namespace whose connections toward the default route leave the cluster from
+the class's egress node.
+
+```yaml
+apiVersion: kuport.wlz.li/v1alpha1
+kind: Egress
+metadata:
+  name: qbittorrent
+  namespace: media
+spec:
+  className: edge-a
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qbittorrent
+  failClosed: true
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| className | string | The EgressClass this asks for. Required, immutable. |
+| podSelector | label selector | Pods in the Egress's namespace. Required. The API refuses a selector with neither matchLabels nor matchExpressions, which would select every pod in the namespace. |
+| failClosed | bool | True drops a selected pod's traffic toward the default route while its path through the egress node is down. False lets that traffic leave from the pod's own node meanwhile. Default false. Mutable. |
+
+Only traffic that would take the pod node's default route changes path. A
+destination with a more specific route on the pod's node (another pod, a node
+address, the LAN, a mesh peer) keeps its path with or without an Egress, and
+whatever `failClosed` says. [datapath.md](datapath.md#egress) has the rules.
+
+An Egress and a PortMap are independent. A pod can leave through the egress node
+with no inbound port, and a pod with both gets two links to that node, one per
+class.
+
+A pod two Egresses select belongs to the earlier one, by creationTimestamp and
+then by namespace and name. The later Egress leaves the pod out of its status
+and reports `EgressConflict`.
+
+### Egress status
+
+The egress node's agent writes the status. When the class names no Node, the
+first node of the cluster by name writes it.
+
+```yaml
+status:
+  node: edge-a
+  pods:
+    - name: qbittorrent-0
+      node: worker-b
+      address: 10.244.18.107
+      path: Link
+      address6: fd00:10:244:12::6b
+      path6: Link
+  observedGeneration: 1
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: Valid
+    - type: Programmed
+      status: "True"
+      reason: AllPodsRouted
+```
+
+`pods` lists every selected pod that is scheduled, holds an address and has not
+finished. `path` says how its IPv4 traffic toward the default route leaves, and
+`path6` its IPv6 traffic:
+
+| Path | Meaning |
+| --- | --- |
+| Link | over a link to the egress node, which masquerades it to its own address |
+| Local | the pod runs on the egress node and leaves through the CNI's masquerade there |
+| Blocked | the path is down and the Egress fails closed: the traffic is dropped |
+| Direct | the path is down and the Egress does not fail closed: the traffic leaves from the pod's own node |
+
+A path is Link once the pair's Link exists and the EgressClass has rows from both
+the egress node and the pod's node. `path6` is Link only when the link also
+carries IPv6 and both nodes forward it.
+
+| Condition | True when | False reasons |
+| --- | --- | --- |
+| Accepted | the class exists and selects this namespace | `ClassNotFound`, `NamespaceNotSelected` |
+| Programmed | every selected pod's path is Link or Local; reason `AllPodsRouted` | `EgressNodeNotFound`, `EgressConflict`, `PodCIDRsUnknown`, `SubnetExhausted`, `ReturnPathUnavailable` |
+
+When several false reasons apply, Programmed reports the first in that order.
+[troubleshooting.md](troubleshooting.md#egress) gives the meaning and the fix
+for each.
+
+`kubectl get egress` prints NAME, CLASS, NODE (from `status.node`), FAIL-CLOSED
+and AGE.
+
 ## Link
 
 Cluster-scoped. The agents write it; a person reads it. Each Link holds one slot
@@ -320,10 +476,10 @@ status: {}
 | Field | Type | Meaning |
 | --- | --- | --- |
 | metadata.name | string | `slot-<n>`, n from 0 to 1023. The name is the slot, so the API server refuses a second Link on the same slot. |
-| spec.classKind | enum | `PortMapClass`. The schema also accepts `EgressClass`, which no kind in this release writes. Immutable, like the whole spec. |
+| spec.classKind | enum | `PortMapClass` or `EgressClass`. Immutable, like the whole spec. |
 | spec.className | string | The class the link serves. Two classes linking the same two nodes get a Link each. |
 | spec.peers | list of two strings | The two node names, sorted. |
-| status.unusedSince | time | Set when no mapping needs the link, cleared when one needs it again. Absent while the link is in use. |
+| status.unusedSince | time | Set when no mapping or Egress needs the link, cleared when one needs it again. Absent while the link is in use. |
 
 ### Numbers a slot fixes
 
@@ -344,9 +500,9 @@ families. A link whose MTU is below 1280 carries IPv4 alone.
 
 | Write | Agent | When |
 | --- | --- | --- |
-| create `slot-<n>` | the agent holding a mapping's pod on that pair | a needed pair has no Link. It picks the lowest slot no Link in its cache holds, and an AlreadyExists answer sends it to the next pass |
-| set `status.unusedSince` | any agent | no mapping needs the pair |
-| clear `status.unusedSince` | any agent | a mapping needs the pair again |
+| create `slot-<n>` | the agent holding a mapping's pod, or a pod an Egress selects, on that pair | a needed pair has no Link. It picks the lowest slot no Link in its cache holds, and an AlreadyExists answer sends it to the next pass |
+| set `status.unusedSince` | any agent | no mapping or Egress needs the pair |
+| clear `status.unusedSince` | any agent | a mapping or an Egress needs the pair again |
 | delete | any agent | `unusedSince` is more than 24 hours old |
 | delete | the agent holding the pod | two Links name the same class and peers; every agent uses the lower slot, and this agent deletes the other |
 
@@ -364,7 +520,7 @@ for a cluster-wide pool.
 | KIND | spec.classKind |
 | CLASS | spec.className |
 | PEERS | spec.peers |
-| UNUSED-SINCE | status.unusedSince, as an age; empty while a mapping needs the link |
+| UNUSED-SINCE | status.unusedSince, as an age; empty while a mapping or an Egress needs the link |
 
 ## Agent flags
 

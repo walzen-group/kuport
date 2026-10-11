@@ -1,7 +1,9 @@
 # Overview
 
 kuport delivers a TCP or UDP port from one node's addresses to a pod, keeping
-the client's source address, and lets the workload ask for that itself.
+the client's source address, and lets the workload ask for that itself. In the
+other direction, an Egress sends the connections a selected pod opens out of
+one chosen node's address.
 
 Status: v0.4.0, 2026-09-08. Both serving modes carry traffic on the test
 cluster, verified across every entry point in UDP and TCP with the client's
@@ -31,6 +33,12 @@ The gap is narrow and real: entry node and workload node in different NAT'd
 sites, joined by a mesh whose tunnel enforces which source addresses each peer
 may send.
 
+The same topology has an outbound side. A pod behind a home connection opens
+its connections from that home address, through the CNI's masquerade on its own
+node. A workload whose PortMaps publish the public node's address, a torrent
+client announcing to its trackers for one, needs its outbound connections to
+leave from that same address.
+
 ## Goals
 
 - A workload declares a port in its own namespace, beside its Service.
@@ -43,6 +51,10 @@ may send.
   with the client's IPv6 address intact.
 - Two workloads asking for one port is reported rather than silently dropped.
 - An admin decides which nodes, interfaces and ports exist, and who may ask.
+- A workload can send the connections its pods open toward the internet out of
+  one chosen node's address. Traffic to the cluster, the LAN and mesh peers
+  keeps its own route, and the workload chooses whether its traffic is dropped
+  or leaves from its own node while that path is down.
 
 ## Non-goals
 
@@ -60,6 +72,10 @@ may send.
 - Admission webhooks. Conflicts are reported in status; the reasoning is under
   [decisions](decisions.md).
 - Replacing the CNI. kuport writes rules beside it.
+- Egress failover. An EgressClass names one node, and moving the traffic means
+  editing it.
+- An Egress for a pod's first packets. A new pod sends from its own node until
+  the agent has seen its address.
 
 ## Requirements of the cluster
 
@@ -69,6 +85,9 @@ may send.
 | nodes reach each other on an address the mesh accepts | both legs of a remote mapping ride a link whose outer header uses those addresses |
 | the CNI gives a pod an address on its own node | the last translation hands the packet to the pod through the CNI's own path there |
 | `net.ipv6.conf.all.forwarding` is 1, for IPv6 delivery only | the accepting node and the pod's node both forward the IPv6 request; a node without it delivers IPv4 alone |
+| every Node carries `spec.podCIDRs`, for Egress only | the agents keep the Egress mark off traffic to the cluster's pod CIDRs and node addresses; without them every Egress reports `PodCIDRsUnknown` |
+| a pod's outbound packets pass the host's prerouting hook on its node, for Egress only | kuport marks a selected pod's connections there |
+| the workload's network policy allows egress to the world, for Egress only | the CNI applies its policy before the packet reaches kuport's rules |
 
 Two requirements were dropped in v0.4.0. Until then the inbound leg travelled
 the CNI's tunnel, which meant Cilium had to be in tunnel mode and pod addresses
@@ -85,10 +104,10 @@ claim is made here that it is done.
 
 | Document | For |
 | --- | --- |
-| [api.md](api.md) | the three kinds, their fields, and what status reports |
+| [api.md](api.md) | the five kinds, their fields, and what status reports |
 | [architecture.md](architecture.md) | how the agents divide the work between them |
 | [datapath.md](datapath.md) | the packet's path and every rule on it |
 | [decisions.md](decisions.md) | why the design is shaped this way |
-| [troubleshooting.md](troubleshooting.md) | a mapping is not working |
+| [troubleshooting.md](troubleshooting.md) | a mapping or an Egress is not working |
 | [integration.md](integration.md) | bringing kuport into a cluster |
 | [development.md](development.md) | building, testing and releasing it |

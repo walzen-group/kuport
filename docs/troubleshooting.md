@@ -1,7 +1,9 @@
 # Troubleshooting
 
-For the person holding a mapping that is not working. Each section names the
-command to run and the answer that tells you what to do next.
+For the person holding a mapping or an Egress that is not working. Each section
+names the command to run and the answer that tells you what to do next.
+[Egress](#egress) covers outbound traffic; every other section is about
+PortMaps.
 
 Where this page describes a failure mode, it comes from the design measurements
 in [datapath.md](datapath.md), from a condition the code reports, or from what a
@@ -284,6 +286,107 @@ and goes out the return link, and an inbound packet reaches the pod through the
 host's forwarding path. A workload that also talks pod to pod meets the limit
 there and should keep that traffic under `linkMTU`.
 
+## Egress
+
+A pod an Egress selects should reach the internet from the egress node's
+address. Start with the list:
+
+```sh
+kubectl get egress -A
+```
+
+Expected result: one row per Egress with CLASS, NODE (the egress node, from
+status), FAIL-CLOSED and AGE. An empty NODE means the agents have written no
+status yet, or the class names no Node.
+
+Then read the Egress:
+
+```sh
+kubectl -n <namespace> get egress <name> -o yaml
+```
+
+`status.pods` lists every selected pod with its node, its addresses and the
+path its node programmed, `path` for IPv4 and `path6` for IPv6:
+
+| Path | Meaning | First check |
+| --- | --- | --- |
+| Link | the pod's default-route traffic goes over a link to the egress node | if a site still sees the pod's own node, see the table further down |
+| Local | the pod runs on the egress node and leaves through the CNI's masquerade there | nothing; the pod already leaves from the egress node |
+| Blocked | the path is down and `failClosed: true` drops the pod's default-route traffic | the Programmed reason below |
+| Direct | the path is down and the pod leaves from its own node | the Programmed reason below |
+
+A selected pod missing from `status.pods` has no address yet, is not scheduled,
+has finished, or belongs to an earlier Egress.
+
+### Egress conditions
+
+| Reason | On | Status | Meaning | First check |
+| --- | --- | --- | --- | --- |
+| Valid | Accepted | True | the class exists and selects this namespace | nothing |
+| ClassNotFound | Accepted | False | `spec.className` names no EgressClass | `kubectl get egressclass` |
+| NamespaceNotSelected | Accepted | False | the namespace's labels do not satisfy the class `namespaceSelector` | `kubectl get ns <ns> --show-labels` and the class selector |
+| AllPodsRouted | Programmed | True | every selected pod's path is Link or Local | if traffic still leaves from the wrong address, the node checks below |
+| EgressNodeNotFound | Programmed | False | the class's `spec.node` names no Node. Every pod's path is down | `kubectl get nodes`, then correct `spec.node` on the EgressClass |
+| EgressConflict | Programmed | False | an earlier Egress selects some of these pods (the message names them) and decides their path | `kubectl -n <ns> get egress` and compare the selectors; narrow one of them |
+| PodCIDRsUnknown | Programmed | False | a Node has no `spec.podCIDRs`, so the agents cannot build the cluster sets and program no path | the command below; the CNI's IPAM has to fill the field, which Cilium does with `ipam.mode: kubernetes` |
+| SubnetExhausted | Programmed | False | all 1024 slots of the link pool are taken | `kubectl get links` |
+| ReturnPathUnavailable | Programmed | False | `no link to <node> yet for <pods>`: the pair's Link does not exist yet, or the EgressClass has no row from the egress node or the pod's node | `kubectl get links`, then `kubectl get egressclass <name> -o jsonpath='{.status.nodes}'`; a row missing for more than a pass or two means that node runs no agent |
+
+When several false reasons apply, Programmed reports the first in table order.
+A node without pod CIDRs shows up in:
+
+```sh
+kubectl get nodes -o custom-columns=NAME:.metadata.name,PODCIDRS:.spec.podCIDRs
+```
+
+Expected result: a CIDR on every row. A row reading `<none>` is the node that
+blocks every Egress.
+
+### Traffic leaves from the wrong address
+
+| What you see | Cause | First check |
+| --- | --- | --- |
+| a site sees the pod's own node, path Link | the destination has a route more specific than main's default, or the pod's node runs a netbird exit node whose default route in table 7120 answers before kuport's rules | `ip route get <site address> mark <link mark>` on the pod's node, and netbird's exit-node setting |
+| a site sees the pod's own node for the first seconds after the pod starts | the agent had not yet seen the pod's address; kuport does not close that window | nothing to fix; [datapath.md](datapath.md#when-the-path-is-down) describes it |
+| the pod reaches nothing outside the cluster, path Link | the app's CiliumNetworkPolicy denies egress to the world, and Cilium drops the packet before it reaches the host | the policy; it has to allow the pod's egress to the world |
+| the pod reaches nothing outside the cluster, path Blocked | the path is down and the Egress fails closed | the Programmed reason |
+
+### Rules on the nodes
+
+Read the routing rules, the blocked table and the kup-egress counters on the
+pod's node from a node debug pod:
+
+```sh
+kubectl debug node/<node> -n kube-system --profile=sysadmin --image=alpine:3.24.2 --attach -- sh -c 'apk add -q iproute2 nftables && ip rule list && ip route show table 11024 && nft list chain inet kuport kup-egress'
+```
+
+Expected result on a pod's node with a pod on path Link: rules at prefs 32763,
+32764 and 32765 for the link's mark (`0x6b70` and the slot), the 32764 one
+carrying `suppress_prefixlength 0`, and a kup-egress rule for the pod's address
+whose counter climbs while the pod opens connections. The route behind 32765 is
+in table 10000 plus the slot:
+
+```sh
+kubectl debug node/<node> -n kube-system --profile=sysadmin --image=alpine:3.24.2 --attach -- sh -c 'apk add -q iproute2 && ip route show table <10000 + slot>'
+```
+
+Expected result: `default via` the egress node's end of the link, `dev kup-<n>`.
+`kubectl get links` gives the slot.
+
+A pod on path Blocked has a kup-egress rule setting mark 0x6b70f000, rules at
+32764 and 32765 for that mark, and `blackhole default` in table 11024. A pod on
+path Direct or Local has no rule at all.
+
+| kup-egress counter | Meaning |
+| --- | --- |
+| climbing | the pod's outbound packets reach the host and are marked |
+| stuck at zero while the pod sends | the packets never reach the host's prerouting hook, or their source is not the address in the rule: the pod's address changed and the agent has not run since, or the CNI routes the pod's traffic outside the host stack |
+
+On the egress node the same command lists rules at prefs 101 and 102 for the
+link's mark. `nft list table inet kuport` there shows a `ct mark set` rule and a
+`masquerade` rule for each `kup-<n>` an Egress uses, and both counters climb
+while the pod's traffic flows.
+
 ## Agent lifecycle
 
 What happens to the host state when the agent moves:
@@ -291,6 +394,7 @@ What happens to the host state when the agent moves:
 | Event | Effect |
 | --- | --- |
 | Clean shutdown (SIGTERM, rolling update, node drain) | the agent removes its nftables table, its kup- links, its routing rules and routes. A node taken out of a class stops holding state nobody wants |
+| Clean shutdown on a node holding a fail-closed Egress pod | the agent leaves those pods blocked: their mark, the blocked rules, the blackhole in table 11024 and the cluster sets stay until the next agent's first pass. Removing kuport leaves them until the node reboots, so delete the Egress objects first |
 | Crash (OOM, node power loss) | the rules stay. The next start reconciles: it rewrites the table whole and removes owned objects the new desired state does not name |
 | Rolling update of the DaemonSet | `maxUnavailable: 1`, one node at a time. On each node there is a window of seconds where the table is gone and rebuilt: the port refuses during the window, and established connections through that node are dropped, because flushing the table drops their NAT bindings |
 | Upgrade from v0.7.1 or earlier | as a rolling update, and each node's first pass rebuilds every link under its Link slot. A link between an upgraded node and an old one does not carry traffic until both run the new agent; [integration.md](integration.md#upgrading-from-v071-or-earlier) has the steps |

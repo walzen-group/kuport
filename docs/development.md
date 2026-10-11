@@ -50,13 +50,14 @@ kuport owns exactly the objects it names:
 | Object | Named |
 | --- | --- |
 | nftables table | `kuport`, family inet; a family ip table of that name, which older releases wrote, is deleted |
-| nftables chains | `kup-steer`, `kup-pre`, `kup-post`, `kup-mangle` |
+| nftables chains | `kup-steer`, `kup-pre`, `kup-post`, `kup-mangle`, `kup-egress`, `kup-mss` |
 | nftables maps | `kup-steer4`, `kup-steer6`, present while a family is steered |
+| nftables sets | `kup-cluster4`, `kup-cluster6`, every Node's pod CIDRs and InternalIPs, present while a family has an Egress rule |
 | stand-in addresses | 169.254.76.0/24 and fd6b:7570::/96; no node holds one, and the link pool's 169.254.64.0/21 stays clear of the IPv4 block |
 | vxlan links | `kup-<n>`, n the slot of the link's Link object, 0 to 1023 |
 | link addresses | the /31 from 169.254.64.0/21 and, for IPv6 delivery, the /127 from fd64:f5ac:e961::1:0/112 on a kup- link; any other global IPv6 address on it is removed, the kernel's link-local one is kept |
-| routing tables | 10000 + slot, 10000 to 11023, in IPv4 and IPv6 |
-| routing rules | pref 101 loop guard (IPv4 only), pref 102 divert (IPv4 and IPv6), any rule whose mark is 0x6b70xxxx; a slot's mark keeps bits 8-11 clear for Cilium (decisions.md, "Link address allocation") |
+| routing tables | 10000 + slot, 10000 to 11023, in IPv4 and IPv6; 11024, which holds only `blackhole default` while a fail-closed Egress pod is blocked, and which every pass reconciles whether or not the plan names it |
+| routing rules | pref 101 loop guard (IPv4 only) and pref 102 divert (IPv4 and IPv6) for a PortMap's return path and an egress node's replies; on an Egress pod's node, pref 32763 loop guard (IPv4 only), 32764 `lookup main suppress_prefixlength 0` and 32765 divert. Any rule whose mark is 0x6b70xxxx is kuport's; a slot's mark keeps bits 8-11 clear for Cilium (decisions.md, "Link address allocation"), and a blocked Egress pod's mark is 0x6b70f000 |
 | masquerade and mark rules | inside kuport's own chains, which are rewritten whole each pass |
 
 Every pass rewrites the whole table in one transaction. Links, rules and routes
@@ -72,9 +73,12 @@ A kernel booted without IPv6 answers an IPv6 rule or route listing with
 EAFNOSUPPORT. The agent skips the IPv6 half of the reconcile there whenever
 the plan holds no IPv6 object, so an IPv4-only node keeps working.
 
-On shutdown the agent removes its table, links, rules and routes, so a node taken
-out of a class stops holding state nobody wants. A crashed agent leaves them, and
-the next start reconciles them away.
+On shutdown the agent removes its table, links, rules and routes, and empties
+table 11024, so a node taken out of a class stops holding state nobody wants. A
+crashed agent leaves them, and the next start reconciles them away. A node
+holding a pod of a fail-closed Egress is the exception: there the agent applies
+the keep state its last pass computed, which holds those pods blocked until the
+next agent starts ([decisions.md](decisions.md#fail-closed-pods-stay-blocked-through-an-agent-restart)).
 
 ### What the agent refuses
 
@@ -91,9 +95,10 @@ of them forward a given mapping is [servingMode](datapath.md#serving-modes).
 ## Testing
 
 **Unit.** The desired-state computation, given a set of PortMapClasses,
-PortMaps, EndpointSlices, Nodes, Namespaces and a node name. Table-driven, no
-cluster, no root. This is where endpoint choice, conflict ordering, class
-selection, link slot allocation, MTU sizing and every refusal are covered.
+PortMaps, EgressClasses, Egresses, Pods, Links, EndpointSlices, Nodes,
+Namespaces and a node name. Table-driven, no cluster, no root. This is where
+endpoint choice, conflict ordering, class selection, link slot allocation, MTU
+sizing, Egress path choice and every refusal are covered.
 
 **Golden rulesets.** The datapath package renders a desired state to the exact
 nftables ruleset and netlink objects it would apply, compared against files in

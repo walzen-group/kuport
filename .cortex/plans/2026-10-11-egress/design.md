@@ -453,7 +453,7 @@ The remaining failures and what a `failClosed: true` pod sees:
 
 | Event | Effect |
 | --- | --- |
-| egress node powered off | nothing rewrites its row, so the pod node keeps marking. The link sends to a node that is down, and the packets are lost |
+| egress node powered off | its row stays; about 40 seconds later its Node's Ready condition turns Unknown and the path goes down (built in v0.8.1; until then the packets are lost in the link) |
 | egress node's agent restarts | its Teardown removes the link and the masquerade. VXLAN packets from the pod node reach no device and are dropped until the next agent's first pass |
 | pod node's agent shuts down cleanly | the agent applies its keep state instead of tearing down: every pod on the node whose Egress sets `failClosed: true` marked `0x6b70f000`, the blocked rules and the blackhole, and nothing else. The next agent's first pass rewrites the table whole. With no such pod, Teardown removes everything as today |
 | pod node's agent crashes | the rules stay, as for every other rule |

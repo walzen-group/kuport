@@ -5,8 +5,12 @@ no central controller and no leader election.
 
 ```
 PortMapClass ─┐
-PortMap ──────┼─→ agent on each node ─→ desired ruleset for THIS node ─→ nftables
-EndpointSlice ┘                      └─→ desired links and routes ────→ netlink
+PortMap ──────┤
+EndpointSlice ┤
+EgressClass ──┼─→ agent on each node ─→ desired ruleset for THIS node ─→ nftables
+Egress ───────┤                      └─→ desired links and routes ────→ netlink
+Pod ──────────┤
+Link ─────────┘
 ```
 
 Every agent computes from the same inputs with the same deterministic
@@ -15,7 +19,7 @@ changes the input on every agent at once, through the same watch.
 
 ```mermaid
 flowchart LR
-    W["Watched objects: PortMapClass, PortMap, Link, EndpointSlice, Node, Namespace"] --> C["reconcile.Compute(Inputs). The same pure function, on every agent."]
+    W["Watched objects: PortMapClass, PortMap, EgressClass, Egress, Link, EndpointSlice, Pod, Node, Namespace"] --> C["reconcile.Compute(Inputs). The same pure function, on every agent."]
     C --> ST["datapath.State for THIS node"]
     C --> SU["status this node owns"]
     ST --> AP["datapath.Apply"]
@@ -93,6 +97,19 @@ The class status is written by the class's accepting nodes alone. Each one
 writes its own `nodes` row and the class conditions, which every accepting node
 computes the same way. A node that only holds a mapping's pod writes nothing to
 the class.
+
+An Egress follows the same rule with the egress node in the serving node's
+place: the egress node's agent writes the Egress status, and when the class
+names no Node, the first node in the cluster by name writes it. An EgressClass
+gets a `nodes` row from every node taking part, the egress node and each node
+holding a selected pod. Every agent decides each selected pod's path from the
+same Links and rows, so the path the egress node reports is the path the pod's
+node programmed. The agent creating a Link for an Egress is the one on the
+selected pod's node.
+
+Every agent caches every Pod for this, stripped to the fields the Egress
+reconcile reads: name, namespace, labels, node, phase, pod IPs and deletion. A
+Pod update starts a pass only when one of those changed.
 
 A return link's slot lives in a cluster-scoped Link object named `slot-<n>`.
 The agent holding a mapping's pod creates the Link for each pair it needs: it

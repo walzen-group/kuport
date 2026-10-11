@@ -4,8 +4,9 @@ Written to the agent doing the integration. It assumes you have the cluster's
 repo in front of you and nothing else: no conversation, no notes. You are
 installing kuport, a DaemonSet that programs nftables and routes so a TCP or
 UDP port on one node reaches a pod on another node with the client's source
-address intact. Read docs/overview.md for why it is shaped this way; this page is
-the procedure.
+address intact, and, through an Egress, so a pod's outbound connections leave
+from one chosen node's address. Read docs/overview.md for why it is shaped this
+way; this page is the procedure.
 
 kuport runs in production on its maintainers' clusters, which both use Talos
 nodes, Cilium in tunnel mode and a netbird WireGuard mesh. A cluster that
@@ -137,7 +138,7 @@ artifact.
 | --- | --- |
 | `kuport-<version>.yaml` | the rendered deploy tree: namespace, ServiceAccount, ClusterRole, DaemonSet, with the image already pinned to the release's digest |
 | `kuport-<version>.tgz` | the Helm chart, same contents, parameterized |
-| `crds-<version>.yaml` | the CustomResourceDefinitions for PortMapClass, PortMap and Link, on their own version track |
+| `crds-<version>.yaml` | the CustomResourceDefinitions for PortMapClass, PortMap, EgressClass, Egress and Link, on their own version track |
 
 The plain manifests are the default. Choose the chart when the `classes`
 value (which creates PortMapClass objects with the release) is easier than a
@@ -163,13 +164,13 @@ kubectl -n kuport-system describe daemonset kuport-agent
 Expected result on a healthy install: no FailedCreate events. A line reading
 `violates PodSecurity "baseline:latest"` is the missing label.
 
-### Who may create a PortMap
+### Who may create a PortMap or an Egress
 
 Both install paths ship two ClusterRoles, kuport-portmap-view and
 kuport-portmap-edit, carrying the aggregation labels for the built-in view,
-edit and admin roles. A subject already bound to one of those in a namespace
-can work with PortMaps there, the same way it can with Deployments and
-Services. Nothing has to be rebound.
+edit and admin roles. They cover PortMaps and Egresses. A subject already bound
+to one of those in a namespace can work with both there, the same way it can
+with Deployments and Services. Nothing has to be rebound.
 
 The kinds are scoped so that RBAC splits along the line the design already
 draws.
@@ -178,11 +179,18 @@ draws.
 | --- | --- | --- |
 | PortMapClass | cluster | the cluster's administrator: which nodes accept, on which interfaces, which ports, which namespaces |
 | PortMap | namespaced | the workload: asks for a port on a class |
+| EgressClass | cluster | the cluster's administrator: which node's address outbound traffic leaves from, and which namespaces may ask |
+| Egress | namespaced | the workload: asks for its pods' outbound traffic to leave through a class's node |
 | Link | cluster | the agents: one return-link slot per object, created and deleted by the agents' own ClusterRole |
 
-portmapclasses and links appear in neither aggregated role, deliberately. A
-namespace admin asks for a port and cannot widen the port range, add an
-accepting node, or admit its own namespace to a class.
+portmapclasses, egressclasses and links appear in neither aggregated role,
+deliberately. A namespace admin asks for a port or an egress node and cannot
+widen the port range, add an accepting node, change the egress node, or admit
+its own namespace to a class.
+
+The agent's own ClusterRole reads every Pod in the cluster, because an Egress
+selects pods by label and the agents compute each selected pod's link from its
+node and addresses.
 
 serviceRef carries a name and a port and no namespace, so a PortMap always
 resolves its Service in its own namespace. A mapping in one namespace cannot
@@ -399,6 +407,129 @@ most often because of a host firewall that drops forwarded traffic, which
 kuport does not inspect. If 1-4 pass and 5 times out: docs/troubleshooting.md,
 the host firewall section and the counters section, in that order.
 
+## Sending a workload's outbound traffic through one node
+
+An Egress makes the connections a workload's pods open toward the internet leave
+from one chosen node's address, usually the node with the public address that
+the workload's PortMaps publish. Only traffic that would take the pod node's
+default route changes path; docs/api.md has the fields and docs/datapath.md the
+rules.
+
+### Requirements
+
+- Every Node carries `spec.podCIDRs`. Cilium fills the field with
+  `ipam.mode: kubernetes`; its cluster-pool mode leaves it empty, and every
+  Egress then reports `PodCIDRsUnknown`:
+
+  ```sh
+  kubectl get nodes -o custom-columns=NAME:.metadata.name,PODCIDRS:.spec.podCIDRs
+  ```
+
+  Expected result: a CIDR on every row.
+
+- A pod's outbound packets pass through the host's prerouting hook on the
+  pod's node, which is where kuport marks them. The kup-egress counter in step 5
+  below shows whether they do.
+
+- The workload's network policy allows its egress to the world. kuport changes
+  the route the packets take and leaves policy to the CNI, and Cilium drops a
+  packet its policy denies before kuport sees it. With Cilium:
+
+  ```yaml
+  apiVersion: cilium.io/v2
+  kind: CiliumNetworkPolicy
+  metadata:
+    name: qbittorrent-egress
+    namespace: media
+  spec:
+    endpointSelector:
+      matchLabels:
+        app.kubernetes.io/name: qbittorrent
+    egress:
+      - toEntities:
+          - world
+  ```
+
+### Step 1: write the EgressClass
+
+```yaml
+apiVersion: kuport.wlz.li/v1alpha1
+kind: EgressClass
+metadata:
+  name: edge-a
+spec:
+  node: edge-a
+  namespaceSelector:
+    matchLabels:
+      kuport.wlz.li/egress: allowed
+```
+
+`node` names the node whose address the traffic leaves from. The egress node's
+main routing table picks the interface, so the traffic leaves by that node's
+default route. Leave `namespaceSelector` out to let every namespace ask.
+
+```sh
+kubectl label namespace media kuport.wlz.li/egress=allowed
+```
+
+### Step 2: write the Egress beside the workload
+
+```yaml
+apiVersion: kuport.wlz.li/v1alpha1
+kind: Egress
+metadata:
+  name: qbittorrent
+  namespace: media
+spec:
+  className: edge-a
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qbittorrent
+  failClosed: true
+```
+
+Set `failClosed: true` when the workload must never reach the internet from its
+own node's address: while the path is down, its default-route traffic is
+dropped. With `false` it leaves from its own node until the path is back.
+Traffic with a more specific route (the cluster, the LAN, mesh peers) keeps
+working in both cases.
+
+### Step 3: confirm the Egress is programmed
+
+```sh
+kubectl -n media get egress qbittorrent -o yaml
+```
+
+Expected result: `Accepted=True` with reason `Valid`, `Programmed=True` with
+reason `AllPodsRouted`, and every pod under `status.pods` with `path: Link`, or
+`Local` for a pod that runs on the egress node. A pod with an IPv6 address
+carries `path6` as well. A false Programmed reason is explained row by row in
+docs/troubleshooting.md, section Egress.
+
+### Step 4: confirm the class rows
+
+```sh
+kubectl get egressclass edge-a -o jsonpath='{.status.nodes}'
+```
+
+Expected result: a row for the egress node and one for each node holding a
+selected pod, each with its `underlayMTU` and `linkMTU`.
+
+### Step 5: probe from the pod
+
+Fetch the pod's public address from an address echo service the pod is allowed
+to reach. Expected result: the egress node's public address. The pod's own
+node's address means the path is not in use; read the kup-egress counter on the
+pod's node as docs/troubleshooting.md, section Egress, describes. A counter
+stuck at zero while the pod sends means its packets do not reach the host's
+prerouting hook.
+
+A pod that just started may send its first packets from its own node, before
+the agent has seen its address. kuport does not close that window.
+
+Delete an Egress with `failClosed: true` before removing kuport. Otherwise its
+pods stay blocked on their nodes until each node reboots.
+
 ## What kuport will not do
 
 So you do not go looking for it:
@@ -421,6 +552,13 @@ So you do not go looking for it:
 - Surviving a rollout with connections intact. Established connections
   through a node drop while its agent restarts, and the port refuses (rather
   than blackholing) while an endpoint has no ready pod.
+- Egress failover. An EgressClass names one node; moving the traffic means
+  editing `spec.node`.
+- Egress for a pod's first packets. A new pod sends from its own node until the
+  agent has seen its address.
+- Per-destination exceptions in an Egress, or selecting its pods through a
+  Service. An Egress selects pods by label and changes only default-route
+  traffic.
 
 ## Upgrades
 
