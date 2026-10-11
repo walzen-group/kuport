@@ -9,7 +9,20 @@ this order:
 2. Egress: an Egress kind and an EgressClass kind, one node per EgressClass,
    pods selected by `podSelector`, failing closed when `failClosed: true`.
 
-Not built yet.
+Built on 2026-10-11 in commits 14d8b6a to dbf0f55, not yet released. The
+sections below are the agreed design with the changes the build made folded in;
+the list here records what changed and why.
+
+## Changes made while building
+
+| Change | Why | Commit |
+| --- | --- | --- |
+| A slot's mark keeps bits 8-11 clear (low 8 bits of the slot in bits 0-7, the next 2 in bits 12-13), and its table is 10000 + n | Cilium's rule at pref 9 sends `mark & 0xf00 == 0x200` to its proxy table 2004; `0x6b700000 \| n` hit it for slots 512-767, and 1000 + n reached table 2004 at slot 1004 | 38131ce |
+| The pod's node routes an Egress mark at prefs 32763-32765, after every other policy rule, with `lookup main suppress_prefixlength 0` before the link's table | At pref 102 the mark ran ahead of netbird's rules at 105 and 110 and took netbird peers, routed networks and the LAN to the egress node. The admin's requirement: an Egress must not override a more specific route | dbf0f55 |
+| `failClosed` holds a pod with mark `0x6b70f000` whose table 11024 holds only `blackhole default`, in both families | An nftables drop of every non-cluster destination also dropped netbird and LAN traffic; the blackhole only catches what would take the default route | ee8b3b6, dbf0f55 |
+| `kup-steer` is unchanged | The kernel test sent a UDP flow from mapped port 40000 out through the egress node's masquerade, and the reply reached the pod through kup-steer | ee8b3b6 |
+| Each link, rule and route is emitted once per node | Two mappings to one remote pod emitted the link's rules twice; `RuleAdd` sends `NLM_F_EXCL`, so the second failed with EEXIST and the apply never converged. This was in v0.7.1 already | c1874e1 |
+| The MSS clamp is measured in a kernel test: TCP_MAXSEG at the site reads 1248 over IPv4 and 1228 over IPv6, the link's 1300 less the headers and the 12-byte timestamp option | | ee8b3b6 |
 
 # Part 1: Links
 
@@ -96,8 +109,8 @@ The pool holds 1024 slots. With every slot taken, the class reports
 | UDP port | 4790 for every link, the agent flag `--link-port` | |
 | IPv4 ends | the nth /31 of `169.254.64.0/21` | `169.254.64.0` to `169.254.71.255` |
 | IPv6 ends | the nth /127 of `fd64:f5ac:e961::1:0/112` | the first 2048 addresses |
-| mark | `0x6b700000 \| n` | |
-| routing table | 1000 + n | 1000 to 2023 |
+| mark | `0x6b700000`, n's low 8 bits in bits 0-7 and its next 2 in bits 12-13 | bits 8-11 always clear |
+| routing table | 10000 + n | 10000 to 11023 |
 | device name | `kup-<n>` | `kup-0` to `kup-1023` |
 
 The lower-named peer gets the low address of each pair, as today. The ranges
@@ -262,27 +275,42 @@ table inet kuport {
   chain kup-egress {
     type filter hook prerouting priority dstnat + 10; policy accept;
     # path Link
-    meta nfproto ipv4 ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter meta mark set <link mark>
+    ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter meta mark set <link mark>
     # path Blocked, failClosed: true
-    meta nfproto ipv4 ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter drop
+    ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter meta mark set 0x6b70f000
     # path Direct, failClosed: false: no rule
     ...the ip6 forms with @kup-cluster6...
   }
 }
 ```
 
+The routing rules sit after Cilium's at 9 and netbird's at 105 and 110, and
+before main at 32766:
+
 ```
-ip rule  add pref 101 fwmark <mark> to <egress node address>/32 lookup main
-ip rule  add pref 102 fwmark <mark> lookup <table>
+ip rule  add pref 32763 fwmark <mark> to <egress node address>/32 lookup main
+ip rule  add pref 32764 fwmark <mark> lookup main suppress_prefixlength 0
+ip rule  add pref 32765 fwmark <mark> lookup <table>
 ip route add default via <egress node's link address> dev kup-<n> table <table>
+
+ip rule  add pref 32764 fwmark 0x6b70f000 lookup main suppress_prefixlength 0
+ip rule  add pref 32765 fwmark 0x6b70f000 lookup 11024
+ip route add blackhole default table 11024
 ```
+
+A destination with a route in main more specific than its default (a pod CIDR,
+the LAN, `wt0`'s range) or a route in netbird's table 7120 keeps its path. Only
+traffic that would take main's default route reaches the link's table, or the
+blackhole while the pod is blocked. One limit: a default route in table 7120,
+which a netbird exit node would install, answers at pref 110 before these rules,
+and the pod's traffic then leaves through the exit node.
 
 The chain sits at `dstnat + 10` because kube-proxy translates a ClusterIP in nat
 prerouting at -100. At kup-mangle's priority, `mangle + 10`, the destination of
 a DNS query is still the CoreDNS ClusterIP, which no pod CIDR contains, and the
 query would go to the egress node. After -100 it is the CoreDNS pod's address.
 The kernel routes after the whole prerouting hook, so a mark set at -90 still
-selects the pref 102 rule. The infra repo runs kube-proxy
+selects the routing rules. The infra repo runs kube-proxy
 (`kube_proxy_replacement: false`); with Cilium's socket load balancer the
 ClusterIP never reaches netfilter and the priority makes no difference.
 
@@ -291,9 +319,8 @@ a client that reached the pod through a PortMap keeps its reply direction and
 leaves as it does today.
 
 kup-cluster4 and kup-cluster6 hold every Node's `spec.podCIDRs` and its
-InternalIP addresses. A selected pod's traffic to a netbird peer address is
-outside both sets and leaves through the egress node like any other
-destination.
+InternalIP addresses. They keep the mark off in-cluster flows, where Cilium sets
+marks of its own.
 
 kup-post claims the flow before Cilium's masquerade, as it does for a reply
 today, without the port match:
@@ -428,7 +455,7 @@ The remaining failures and what a `failClosed: true` pod sees:
 | --- | --- |
 | egress node powered off | nothing rewrites its row, so the pod node keeps marking. The link sends to a node that is down, and the packets are lost |
 | egress node's agent restarts | its Teardown removes the link and the masquerade. VXLAN packets from the pod node reach no device and are dropped until the next agent's first pass |
-| pod node's agent shuts down cleanly | Teardown replaces the table with one holding kup-egress and only its drop rules, for every pod on the node whose Egress sets `failClosed: true`. The next agent's first pass rewrites the table whole. With no such pod, Teardown removes the table as today |
+| pod node's agent shuts down cleanly | the agent applies its keep state instead of tearing down: every pod on the node whose Egress sets `failClosed: true` marked `0x6b70f000`, the blocked rules and the blackhole, and nothing else. The next agent's first pass rewrites the table whole. With no such pod, Teardown removes everything as today |
 | pod node's agent crashes | the rules stay, as for every other rule |
 | the Egress is deleted | its rules go on the next pass, and the pod leaves from its own node. Deleting the Egress is the admin's choice to stop routing through the egress node |
 | a new pod starts, or the pod node reboots | the pod sends from the moment its sandbox has an address. Until the agent's Pod watch delivers that address and the next pass runs, no rule matches it and it leaves from its own node. A reboot clears every nftables rule, so after one this applies to every selected pod on the node |
@@ -437,9 +464,9 @@ The last row is a window this design does not close. Neither the gap between a
 sandbox getting its address and the agent's next pass nor the time qBittorrent
 spends before its first announce has been measured.
 
-Removing kuport while an Egress with `failClosed: true` exists leaves the drop
-rules in place on every pod node until that node reboots. Delete the Egress
-objects first.
+Removing kuport while an Egress with `failClosed: true` exists leaves the
+blocked mark, its rules and the blackhole on every pod node until that node
+reboots. Delete the Egress objects first.
 
 Under `failClosed: false` every event in this table sends the pod's traffic out
 from its own node until the path is back.
@@ -513,8 +540,15 @@ the route the packets take and leaves policy to Cilium.
   link; two Egresses on one pod resolve to the earlier; an empty
   `spec.podCIDRs` yields `PodCIDRsUnknown` and a down path; a namespace outside
   the class's selector yields `NamespaceNotSelected`.
-- Teardown: with a `failClosed: true` pod on the node, Teardown leaves a table
-  holding only kup-egress drop rules; with none, it removes the table as today.
+- Teardown: with a `failClosed: true` pod on the node, shutdown applies the keep
+  state (the blocked mark, its rules and the blackhole); with none, it removes
+  everything as today.
+- Kernel, built: TestEgressOnRealKernel in internal/datapath carries traffic
+  through four namespaces and checks that a destination with a more specific
+  route keeps its path, routed and blocked alike.
+- On the cluster, added: from the probe pod, a netbird peer and a LAN host
+  still answer from quasar's addresses while the Egress is routed and while it
+  is blocked.
 - Netlink: the egress node's pref 101 and 102 rules and its table route.
 - On the cluster: a probe pod on quasar's worker with an Egress on an
   EgressClass naming bar fetches its public address from an address echo
