@@ -1,7 +1,8 @@
 # Egress through an accepting node
 
 Status: agreed with the admin on 2026-10-11 in conversation: a separate Egress
-kind, pods selected by `podSelector`, failing closed. Not built yet.
+kind, pods selected by `podSelector`, failing closed when `failClosed: true`.
+Not built yet.
 
 ## Goal
 
@@ -27,6 +28,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: qbittorrent
+  failClosed: true
 status:
   node: talos-netcup-bar-w-1
   pods:
@@ -34,7 +36,7 @@ status:
       node: talos-quasar-w-1
       address: 10.244.5.5
       address6: fd9f:6e92:f8f3:5::5
-      path: Link        # Link, Local or Blocked
+      path: Link        # Link, Local, Blocked or Direct
   conditions: [...]
 ```
 
@@ -42,6 +44,7 @@ status:
 | --- | --- |
 | spec.className | the class whose accepting node carries the traffic. Immutable, for the reason PortMapSpec gives |
 | spec.podSelector | pods in the Egress's namespace. Validation rejects an empty selector, which would select every pod in the namespace |
+| spec.failClosed | optional, default false. True drops a selected pod's non-cluster traffic while its path through the egress node is down; false lets it leave from its own node. Mutable: the next pass swaps the rule |
 | status.node | the egress node, where the traffic leaves the cluster |
 | status.pods | every selected pod with an address, and which path its node programmed for it |
 
@@ -57,7 +60,7 @@ ones:
 | Reason | When |
 | --- | --- |
 | `EgressConflict` | a selected pod is selected by an earlier Egress. The earliest `creationTimestamp`, then the name, wins, the order conflicts.go already uses for ports |
-| `PodCIDRsUnknown` | a Node has no `spec.podCIDRs`, so the agents cannot build the set of cluster addresses. Every selected pod is Blocked |
+| `PodCIDRsUnknown` | a Node has no `spec.podCIDRs`, so the agents cannot build the set of cluster addresses. Every selected pod's path is down |
 
 ## Egress node
 
@@ -91,8 +94,9 @@ table inet kuport {
     type filter hook prerouting priority dstnat + 10; policy accept;
     # path Link
     meta nfproto ipv4 ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter meta mark set <link mark>
-    # path Blocked
+    # path Blocked, failClosed: true
     meta nfproto ipv4 ip saddr <pod ip> ip daddr != @kup-cluster4 ct direction original counter drop
+    # path Direct, failClosed: false: no rule
     ...the ip6 forms with @kup-cluster6...
   }
 }
@@ -185,26 +189,31 @@ The pod's node clamps the pod's SYN, and the egress node clamps the remote
 SYN-ACK. The clamp also covers PortMap flows, which today depend on
 fragmentation or ICMP for TCP above 1300.
 
-## Fail closed
+## When the path is down
 
-The pod's node chooses Link or Blocked for each selected pod from inputs every
-agent shares, so the egress node writes the same path into status:
+The pod's node chooses the path for each selected pod from inputs every agent
+shares, so the egress node writes the same path into status. Down means Blocked
+under `failClosed: true` and Direct under `failClosed: false`:
 
 | Inputs | Path |
 | --- | --- |
 | the claim for the pair has landed, and the class status rows of the egress node and the pod's node are both ready | Link |
-| the claim has not landed, or either row is not ready | Blocked |
-| the pod has an IPv6 address and the link has no /127, or either node has IPv6 forwarding off | IPv6 Blocked, IPv4 decided by the rows above |
-| a Node lacks `spec.podCIDRs` | Blocked |
-| a later Egress selects the pod too | the earlier Egress decides |
+| the claim has not landed, or either row is not ready | down |
+| the pod has an IPv6 address and the link has no /127, or either node has IPv6 forwarding off | IPv6 down, IPv4 decided by the rows above |
+| a Node lacks `spec.podCIDRs` | down |
+| a later Egress selects the pod too | the earlier Egress decides, its `failClosed` included |
 
-The remaining failures and what the pod sees:
+A Direct pod's traffic goes out Cilium's masquerade from its own node's
+address, as it would with no Egress. The condition `Programmed=False` with
+reason `ReturnPathUnavailable` reports the down path either way.
+
+The remaining failures and what a `failClosed: true` pod sees:
 
 | Event | Effect |
 | --- | --- |
 | egress node powered off | nothing rewrites its row, so the pod node keeps marking. The link sends to a node that is down, and the packets are lost |
 | egress node's agent restarts | its Teardown removes the link and the masquerade. VXLAN packets from the pod node reach no device and are dropped until the next agent's first pass |
-| pod node's agent shuts down cleanly | Teardown replaces the table with one holding kup-egress and only its drop rules, for every selected pod on the node. The next agent's first pass rewrites the table whole |
+| pod node's agent shuts down cleanly | Teardown replaces the table with one holding kup-egress and only its drop rules, for every pod on the node whose Egress sets `failClosed: true`. The next agent's first pass rewrites the table whole. With no such pod, Teardown removes the table as today |
 | pod node's agent crashes | the rules stay, as for every other rule |
 | the Egress is deleted | its rules go on the next pass, and the pod leaves from its own node. Deleting the Egress is the admin's choice to stop routing through bar |
 | a new pod starts | the pod sends from the moment its sandbox has an address. Until the agent's Pod watch delivers that address and the next pass runs, no rule matches it and it leaves from its own node |
@@ -213,8 +222,12 @@ The last row is a window this design does not close. Neither the gap between a
 sandbox getting its address and the agent's next pass nor the time qBittorrent
 spends before its first announce has been measured.
 
-Removing kuport while an Egress exists leaves the drop rules in place on every
-pod node until that node reboots. Delete the Egress objects first.
+Removing kuport while an Egress with `failClosed: true` exists leaves the drop
+rules in place on every pod node until that node reboots. Delete the Egress
+objects first.
+
+Under `failClosed: false` every event in this table sends the pod's traffic out
+from its own node until the path is back.
 
 ## Inputs
 
@@ -249,17 +262,21 @@ the route the packets take and leaves policy to Cilium.
 
 ## Tests
 
-- Goldens: kup-egress in both families with the Link and Blocked forms, the
+- Goldens: kup-egress in both families with the Link and Blocked forms and the
+  empty Direct form, the
   kup-cluster sets, the egress node's ct save, ct load and masquerade rules,
   kup-mss, and kup-steer with `ct direction original`.
 - Reconcile: an Egress whose pod shares a node with a PortMap's endpoint yields
   one link pair; a pod on the egress node yields no rules and path Local; a
-  pending claim yields Blocked; two Egresses on one pod resolve to the earlier;
-  an empty `spec.podCIDRs` yields `PodCIDRsUnknown` and Blocked.
-- Teardown: with a selected pod on the node, Teardown leaves a table holding
-  only kup-egress drop rules; with none, it removes the table as today.
+  pending claim yields Blocked under `failClosed: true` and Direct under false;
+  flipping `failClosed` swaps the rule on the next pass; two Egresses on one pod
+  resolve to the earlier; an empty `spec.podCIDRs` yields `PodCIDRsUnknown`
+  and a down path.
+- Teardown: with a `failClosed: true` pod on the node, Teardown leaves a table
+  holding only kup-egress drop rules; with none, it removes the table as today.
 - Netlink: the egress node's pref 101 and 102 rules and its table route.
 - On the cluster: a probe pod on quasar's worker with an Egress on
   `netcup-bar-w-1` fetches its public address from an address echo service and
-  reads bar's. TCP and UDP, IPv4 and IPv6. Then, with bar's agent stopped, the
-  probe's fetch times out and never returns quasar's address.
+  reads bar's. TCP and UDP, IPv4 and IPv6. Then, with bar's agent stopped and
+  `failClosed: true`, the probe's fetch times out and never returns quasar's
+  address; with `failClosed: false` it returns quasar's address.
