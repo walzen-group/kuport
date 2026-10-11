@@ -684,13 +684,40 @@ func internalIP(n *corev1.Node) string {
 // sortState orders every slice of a State by a total, deterministic key so the
 // output never carries map or input ordering. Determinism here is a correctness
 // property: two agents must emit byte-identical state for the same inputs.
+//
+// Each slice also loses its duplicates. Every mapping over a link emits that
+// link's device, rules and routes, so a TCP and a UDP mapping to one remote pod
+// emit them twice, and the kernel answers the second identical rule with "file
+// exists", failing the whole apply.
 func sortState(st *datapath.State) {
-	sort.Slice(st.DNAT, func(i, j int) bool { return dnatKey(st.DNAT[i]) < dnatKey(st.DNAT[j]) })
-	sort.Slice(st.Exempt, func(i, j int) bool { return exemptKey(st.Exempt[i]) < exemptKey(st.Exempt[j]) })
-	sort.Slice(st.Mark, func(i, j int) bool { return markKey(st.Mark[i]) < markKey(st.Mark[j]) })
-	sort.Slice(st.Links, func(i, j int) bool { return linkKey(st.Links[i]) < linkKey(st.Links[j]) })
-	sort.Slice(st.Rules, func(i, j int) bool { return ruleKey(st.Rules[i]) < ruleKey(st.Rules[j]) })
-	sort.Slice(st.Routes, func(i, j int) bool { return routeKey(st.Routes[i]) < routeKey(st.Routes[j]) })
+	st.DNAT = sortUnique(st.DNAT, dnatKey)
+	st.Exempt = sortUnique(st.Exempt, exemptKey)
+	st.Mark = sortUnique(st.Mark, markKey)
+	st.CtSave = sortUnique(st.CtSave, func(r datapath.CtSaveRule) string { return fmt.Sprintf("%s|%010d", r.Iface, r.Mark) })
+	st.CtLoad = sortUnique(st.CtLoad, func(r datapath.CtLoadRule) string { return r.SrcAddr.String() + "|" + selKey(r.Port) })
+	st.Links = sortUnique(st.Links, linkKey)
+	st.Rules = sortUnique(st.Rules, ruleKey)
+	st.Routes = sortUnique(st.Routes, routeKey)
+	st.Egress = sortUnique(st.Egress, func(r datapath.EgressRule) string { return fmt.Sprintf("%s|%010d", r.SrcAddr, r.Mark) })
+	st.EgressGateway = sortUnique(st.EgressGateway, func(r datapath.EgressGatewayRule) string { return fmt.Sprintf("%s|%010d", r.Iface, r.Mark) })
+	st.ClusterCIDRs = sortUnique(st.ClusterCIDRs, func(p netip.Prefix) string { return p.String() })
+}
+
+// sortUnique sorts s by key and drops every element whose key repeats the one
+// before it. Elements with equal keys are equal in every field the datapath
+// reads, so which one survives does not matter.
+func sortUnique[T any](s []T, key func(T) string) []T {
+	if len(s) == 0 {
+		return s
+	}
+	sort.SliceStable(s, func(i, j int) bool { return key(s[i]) < key(s[j]) })
+	out := s[:1]
+	for _, e := range s[1:] {
+		if key(e) != key(out[len(out)-1]) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func selKey(p datapath.PortSel) string {
@@ -719,11 +746,11 @@ func ruleKey(r datapath.IPRule) string {
 	if r.To != nil {
 		to = r.To.String()
 	}
-	return fmt.Sprintf("%010d|%010d|%s|%010d|%d", r.Pref, r.Mark, to, r.Table, r.Family)
+	return fmt.Sprintf("%010d|%010d|%s|%010d|%d|%t", r.Pref, r.Mark, to, r.Table, r.Family, r.SuppressDefault)
 }
 
 func routeKey(r datapath.Route) string {
-	return fmt.Sprintf("%010d|%s|%s", r.Table, r.Via.String(), r.Dev)
+	return fmt.Sprintf("%010d|%s|%s|%t|%d", r.Table, r.Via.String(), r.Dev, r.Blackhole, r.BlackholeFamily)
 }
 
 func addrPtrKey(a *netip.Addr) string {
