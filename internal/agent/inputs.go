@@ -24,8 +24,11 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 		pms     v1alpha1.PortMapList
 		slices  discoveryv1.EndpointSliceList
 		links   v1alpha1.LinkList
+		egcs    v1alpha1.EgressClassList
+		egs     v1alpha1.EgressList
+		pods    corev1.PodList
 	)
-	for _, list := range []client.ObjectList{&nodes, &nss, &classes, &pms, &slices, &links} {
+	for _, list := range []client.ObjectList{&nodes, &nss, &classes, &pms, &slices, &links, &egcs, &egs, &pods} {
 		if err := r.Client.List(ctx, list); err != nil {
 			return kreconcile.Inputs{}, err
 		}
@@ -38,6 +41,15 @@ func (r *Reconciler) buildInputs(ctx context.Context) (kreconcile.Inputs, error)
 	}
 	for i := range links.Items {
 		in.Links = append(in.Links, &links.Items[i])
+	}
+	for i := range egcs.Items {
+		in.EgressClasses = append(in.EgressClasses, &egcs.Items[i])
+	}
+	for i := range egs.Items {
+		in.Egresses = append(in.Egresses, &egs.Items[i])
+	}
+	for i := range pods.Items {
+		in.Pods = append(in.Pods, &pods.Items[i])
 	}
 	for i := range nodes.Items {
 		in.Nodes = append(in.Nodes, &nodes.Items[i])

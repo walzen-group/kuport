@@ -403,7 +403,7 @@ func reportSourceAt(t *testing.T, at netip.AddrPort) {
 				defer c.Close() //nolint:errcheck
 				from := netip.MustParseAddrPort(c.RemoteAddr().String()).Addr().Unmap()
 				fmt.Fprintf(c, "%s %d\n", from, tcpMSS(c)) //nolint:errcheck
-				c.Write(make([]byte, bulkBytes)) //nolint:errcheck
+				c.Write(make([]byte, bulkBytes))           //nolint:errcheck
 			}()
 		}
 	}()

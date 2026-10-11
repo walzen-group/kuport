@@ -91,6 +91,38 @@ func TestEnvtestClassStatus(t *testing.T) {
 	}
 }
 
+// TestEnvtestEgressValidation: an Egress with an empty podSelector would select
+// every pod in its namespace and is refused, and its className cannot change.
+func TestEnvtestEgressValidation(t *testing.T) {
+	c, stop := startEnv(t)
+	defer stop()
+	ctx := context.Background()
+
+	empty := &v1alpha1.Egress{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "everything"},
+		Spec:       v1alpha1.EgressSpec{ClassName: "out"},
+	}
+	if err := c.Create(ctx, empty); err == nil {
+		t.Error("an Egress with an empty podSelector was accepted")
+	}
+
+	eg := &v1alpha1.Egress{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "qb"},
+		Spec: v1alpha1.EgressSpec{
+			ClassName:   "out",
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "qb"}},
+			FailClosed:  true,
+		},
+	}
+	if err := c.Create(ctx, eg); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	eg.Spec.ClassName = "elsewhere"
+	if err := c.Update(ctx, eg); err == nil {
+		t.Error("changing className was accepted")
+	}
+}
+
 // TestEnvtestLinkPool proves on a real API server what the pool rests on: a
 // second create of a slot's name is refused whichever class asks, a Link's spec
 // cannot change, and a deprecated vxlan block is stored as written with no

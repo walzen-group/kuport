@@ -44,6 +44,13 @@ type Inputs struct {
 	// Links is the cluster-wide pool of return-link claims.
 	Links []*v1alpha1.Link
 
+	// EgressClasses, Egresses and Pods decide which pods leave the cluster
+	// from which node. Pods carry only what the agent's cache keeps: name,
+	// namespace, labels, node, addresses and phase.
+	EgressClasses []*v1alpha1.EgressClass
+	Egresses      []*v1alpha1.Egress
+	Pods          []*corev1.Pod
+
 	// LinkPort is the UDP port every return link uses, the agent's
 	// --link-port. 0 means the default, 4790.
 	LinkPort uint16
@@ -91,6 +98,17 @@ type Result struct {
 	// Links are this node's writes to the Link pool: the Links it creates as
 	// a pair's holder, and the UnusedSince updates and deletes any agent makes.
 	Links LinkActions
+
+	// EgressStatus holds the status of the Egresses this node owns.
+	EgressStatus map[types.NamespacedName]v1alpha1.EgressStatus
+
+	// EgressClassStatus is this node's row and the conditions for every
+	// EgressClass it takes part in.
+	EgressClassStatus map[string]EgressClassContribution
+
+	// Keep is the state the agent leaves on the node when it stops: its
+	// fail-closed Egress pods held in the blackhole.
+	Keep datapath.State
 }
 
 // ClassContribution is one accepting node's contribution to a class's status.
@@ -188,8 +206,10 @@ type chosenEndpoint struct {
 // slice is sorted so that map iteration order never leaks into the Result.
 func Compute(in Inputs) Result {
 	res := Result{
-		PortMapStatus: map[types.NamespacedName]v1alpha1.PortMapStatus{},
-		ClassStatus:   map[string]ClassContribution{},
+		PortMapStatus:     map[types.NamespacedName]v1alpha1.PortMapStatus{},
+		ClassStatus:       map[string]ClassContribution{},
+		EgressStatus:      map[types.NamespacedName]v1alpha1.EgressStatus{},
+		EgressClassStatus: map[string]EgressClassContribution{},
 	}
 
 	idx := newIndex(in)
@@ -198,19 +218,29 @@ func Compute(in Inputs) Result {
 	// endpoint choice and roles. conflicts.go owns the ordering.
 	mappings := resolveMappings(in, idx)
 
+	// Resolve every Egress: validation and pod selection. egress.go owns it.
+	egresses := resolveEgresses(in, idx)
+
 	// Settle every needed pair's slot in the cluster-wide pool, so State and
 	// status agree on which slot each link uses. links.go owns the arithmetic.
-	alloc := allocateLinks(in.Links, neededPairs(mappings))
+	needed := neededPairs(mappings)
+	addEgressNeeds(needed, egresses)
+	alloc := allocateLinks(in.Links, needed)
 
 	// The served mappings deferred their Programmed condition to the
-	// settled rows and slots; decideRole could not see either.
+	// settled rows and slots; decideRole could not see either. Each Egress
+	// pod's path waits on the same.
 	resolveProgrammed(in, idx, mappings, alloc)
+	decidePaths(in, idx, egresses, alloc)
 
 	// State: the rules, links, marks and routes this node should hold.
-	buildState(&res.State, in, idx, mappings, alloc)
+	buildState(&res.State, in, idx, mappings, egresses, alloc)
+	res.Keep = keepState(in, egresses)
 
 	// Class status: this node's Nodes row and the class conditions.
 	buildClassStatus(&res, in, idx, alloc)
+	buildEgressClassStatus(&res, in, egresses, alloc)
+	buildEgressStatus(&res, in, egresses, alloc)
 
 	// The pool: Links to create, UnusedSince to set or clear, Links to delete.
 	res.Links = linkActions(alloc, in.NodeName, in.Now)
@@ -226,13 +256,14 @@ func Compute(in Inputs) Result {
 // exemption, link, rules and route where this node holds a remote pod, and the
 // return-link device on whichever end this node sits. Every slice is sorted at
 // the end so the State never depends on map or input order.
-func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, alloc linkAlloc) {
+func buildState(st *datapath.State, in Inputs, idx *index, mappings []*mapping, egresses []*egressDecision, alloc linkAlloc) {
 	for _, m := range mappings {
 		if !m.accepted || m.endpoint == nil || m.effAccepting == "" {
 			continue
 		}
 		emitMapping(st, in, idx, m, alloc)
 	}
+	emitEgress(st, in, idx, egresses)
 	unifyLinkAddr6(st)
 	st.LocalAddrs = sortedAddrs(in.LocalAddrs)
 	sortState(st)

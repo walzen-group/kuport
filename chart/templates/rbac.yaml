@@ -32,6 +32,17 @@ rules:
   - apiGroups: ["kuport.wlz.li"]
     resources: ["links/status"]
     verbs: ["update"]
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["egressclasses", "egresses"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["kuport.wlz.li"]
+    resources: ["egressclasses/status", "egresses/status"]
+    verbs: ["update"]
+  # An Egress selects pods by label, so every agent reads every pod's labels,
+  # node and addresses; the agent's cache keeps only those fields.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "watch"]
@@ -73,9 +84,13 @@ subjects:
 # Services there and is refused a PortMap, which reads as a broken deployment
 # rather than a missing rule.
 #
-# portmapclasses appears in neither. A class decides which nodes accept traffic,
-# on which interfaces and for which ports, so it stays with whoever administers
-# the cluster. A namespace admin asks for a port; it does not set the terms.
+# Egresses ride along: a namespace admin asks for an egress node the way it asks
+# for a port, and the class's namespaceSelector decides whether it gets one.
+#
+# portmapclasses and egressclasses appear in neither. A class decides which
+# nodes accept traffic or carry it out, on which interfaces and for which ports,
+# so it stays with whoever administers the cluster. A namespace admin asks for a
+# port or an egress; it does not set the terms.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -88,7 +103,7 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-cluster-reader: "true"
 rules:
   - apiGroups: ["kuport.wlz.li"]
-    resources: ["portmaps", "portmaps/status"]
+    resources: ["portmaps", "portmaps/status", "egresses", "egresses/status"]
     verbs: ["get", "list", "watch"]
 ---
 # The write verbs only. The read verbs arrive through the view role above, which
@@ -103,6 +118,6 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
 rules:
   - apiGroups: ["kuport.wlz.li"]
-    resources: ["portmaps"]
+    resources: ["portmaps", "egresses"]
     verbs: ["create", "delete", "deletecollection", "patch", "update"]
 {{- end }}

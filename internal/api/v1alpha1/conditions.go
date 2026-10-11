@@ -67,3 +67,19 @@ const (
 	// ReasonSubnetExhausted: every slot of the cluster-wide link pool is taken.
 	ReasonSubnetExhausted = "SubnetExhausted"
 )
+
+// Egress reasons. Accepted reuses ReasonValid, ReasonClassNotFound and
+// ReasonNamespaceNotSelected; Programmed reuses ReasonReturnPathUnavailable
+// and ReasonSubnetExhausted.
+const (
+	// ReasonAllPodsRouted: every selected pod's path is Link or Local.
+	ReasonAllPodsRouted = "AllPodsRouted"
+	// ReasonEgressConflict: a selected pod is selected by an earlier Egress,
+	// which decides its path.
+	ReasonEgressConflict = "EgressConflict"
+	// ReasonPodCIDRsUnknown: a Node has no spec.podCIDRs, so the cluster's
+	// own destinations cannot be told apart and every path is down.
+	ReasonPodCIDRsUnknown = "PodCIDRsUnknown"
+	// ReasonEgressNodeNotFound: the class's node names no Node.
+	ReasonEgressNodeNotFound = "EgressNodeNotFound"
+)

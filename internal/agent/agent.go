@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
@@ -26,8 +27,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
@@ -106,6 +110,19 @@ type Reconciler struct {
 	// lastIPv6Fwd is the IPv6 forwarding state last logged, nil before the
 	// first read, so the log says it once per change rather than every pass.
 	lastIPv6Fwd *bool
+
+	// keep is the state the last pass says to leave on the node when the
+	// agent stops: its fail-closed Egress pods held in the blackhole.
+	keep atomic.Pointer[datapath.State]
+}
+
+// KeepState returns what to leave on the node at shutdown, the zero State
+// when nothing has to stay.
+func (r *Reconciler) KeepState() datapath.State {
+	if k := r.keep.Load(); k != nil {
+		return *k
+	}
+	return datapath.State{}
 }
 
 // Ready reports whether at least one reconcile has completed. The caches are
@@ -121,10 +138,12 @@ func (r *Reconciler) now() metav1.Time {
 	return metav1.Now()
 }
 
-// SetupWithManager wires the six watches to the single whole-node request key.
+// SetupWithManager wires the nine watches to the single whole-node request key.
 // Node stays cluster-wide: host checks read only this node from the cache, but
 // class selection needs every node's labels and InternalIP, so the informer is
-// not filtered.
+// not filtered. Pods are watched cluster-wide too, because the egress node and
+// every node holding a selected pod compute the same links; a pod update
+// enqueues a pass only when a field the reconcile reads has changed.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	toNode := handler.EnqueueRequestsFromMapFunc(
 		func(context.Context, client.Object) []reconcile.Request {
@@ -136,10 +155,48 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.PortMapClass{}, toNode).
 		Watches(&v1alpha1.PortMap{}, toNode).
 		Watches(&v1alpha1.Link{}, toNode).
+		Watches(&v1alpha1.EgressClass{}, toNode).
+		Watches(&v1alpha1.Egress{}, toNode).
+		Watches(&corev1.Pod{}, toNode, builder.WithPredicates(podChanged)).
 		Watches(&discoveryv1.EndpointSlice{}, toNode).
 		Watches(&corev1.Node{}, toNode).
 		Watches(&corev1.Namespace{}, toNode).
 		Complete(r)
+}
+
+// podChanged passes a pod update only when a field the reconcile reads moved.
+var podChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		a, ok1 := e.ObjectOld.(*corev1.Pod)
+		b, ok2 := e.ObjectNew.(*corev1.Pod)
+		if !ok1 || !ok2 {
+			return true
+		}
+		return !reflect.DeepEqual(a.Labels, b.Labels) ||
+			a.Spec.NodeName != b.Spec.NodeName ||
+			a.Status.Phase != b.Status.Phase ||
+			!reflect.DeepEqual(a.Status.PodIPs, b.Status.PodIPs) ||
+			(a.DeletionTimestamp == nil) != (b.DeletionTimestamp == nil)
+	},
+}
+
+// PodFields strips a pod to what the reconcile reads: its identity, labels,
+// node, addresses, phase and deletion. The agent's cache stores pods in this
+// form, so a cluster's pods cost the agent little memory.
+func PodFields(p *corev1.Pod) *corev1.Pod {
+	return &corev1.Pod{
+		TypeMeta: p.TypeMeta,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              p.Name,
+			Namespace:         p.Namespace,
+			UID:               p.UID,
+			ResourceVersion:   p.ResourceVersion,
+			Labels:            p.Labels,
+			DeletionTimestamp: p.DeletionTimestamp,
+		},
+		Spec:   corev1.PodSpec{NodeName: p.Spec.NodeName},
+		Status: corev1.PodStatus{Phase: p.Status.Phase, PodIPs: p.Status.PodIPs},
+	}
 }
 
 // Reconcile recomputes the complete desired state for this node and imposes it:
@@ -152,6 +209,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	res := kreconcile.Compute(in)
+	keep := res.Keep
+	r.keep.Store(&keep)
 
 	if err := r.applyState(ctx, res.State); err != nil {
 		return reconcile.Result{}, fmt.Errorf("apply datapath: %w", err)

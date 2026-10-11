@@ -1,5 +1,5 @@
-// Package v1alpha1 contains the kuport.wlz.li API types: PortMapClass, PortMap
-// and Link.
+// Package v1alpha1 contains the kuport.wlz.li API types: PortMapClass, PortMap,
+// EgressClass, Egress and Link.
 // +kubebuilder:object:generate=true
 // +groupName=kuport.wlz.li
 package v1alpha1
@@ -25,6 +25,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&PortMapClass{}, &PortMapClassList{},
 		&PortMap{}, &PortMapList{},
 		&Link{}, &LinkList{},
+		&EgressClass{}, &EgressClassList{},
+		&Egress{}, &EgressList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

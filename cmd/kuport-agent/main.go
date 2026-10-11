@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -134,8 +136,20 @@ func run(cfg config) error {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), manager.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: cfg.healthAddr,
-		Cache:                  cache.Options{SyncPeriod: &cfg.resync},
-		Metrics:                metricsserver.Options{BindAddress: "0"},
+		Cache: cache.Options{
+			SyncPeriod: &cfg.resync,
+			// Every agent caches every pod for the Egress reconcile; the
+			// transform keeps only the fields it reads.
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Pod{}: {Transform: func(o any) (any, error) {
+					if p, ok := o.(*corev1.Pod); ok {
+						return agent.PodFields(p), nil
+					}
+					return o, nil
+				}},
+			},
+		},
+		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	if err != nil {
 		return fmt.Errorf("build manager: %w", err)
@@ -159,7 +173,7 @@ func run(cfg config) error {
 		return fmt.Errorf("set up reconciler: %w", err)
 	}
 
-	if err := mgr.Add(agent.TeardownRunnable{DP: dp, Log: log.WithName("shutdown")}); err != nil {
+	if err := mgr.Add(agent.TeardownRunnable{DP: dp, Keep: r.KeepState, Log: log.WithName("shutdown")}); err != nil {
 		return fmt.Errorf("add teardown runnable: %w", err)
 	}
 

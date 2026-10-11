@@ -26,21 +26,33 @@ func (d HostDatapath) Teardown(ctx context.Context) error {
 }
 
 // TeardownRunnable is a manager.Runnable that tears the datapath down on
-// shutdown. It blocks until its context is cancelled — which the signal handler
-// does on SIGTERM or SIGINT — then runs Teardown so a node leaving a class stops
+// shutdown. It blocks until its context is cancelled, which the signal handler
+// does on SIGTERM or SIGINT, then runs Teardown so a node leaving a class stops
 // holding state nobody wants. A crashed agent skips this and the next Apply
 // reconciles its leftovers away, which is why there is no startup cleanup to
 // fight that.
+//
+// Keep, when it returns a State holding egress rules, replaces the teardown
+// with an Apply of that State: the node's fail-closed Egress pods stay held in
+// the blackhole until the next agent's first pass, so a rolling update leaves
+// no window where their default-route traffic leaves from this node.
 type TeardownRunnable struct {
-	DP  Datapath
-	Log logr.Logger
+	DP   Datapath
+	Keep func() datapath.State
+	Log  logr.Logger
 }
 
 // Start blocks until ctx is done, then tears down. It returns Teardown's error
 // so a failed cleanup surfaces in the manager's shutdown.
 func (t TeardownRunnable) Start(ctx context.Context) error {
 	<-ctx.Done()
+	// The parent context is already cancelled, so give the datapath a live one.
+	if t.Keep != nil {
+		if keep := t.Keep(); len(keep.Egress) > 0 {
+			t.Log.Info("shutting down; keeping fail-closed egress pods blocked", "pods", len(keep.Egress))
+			return t.DP.Apply(context.Background(), keep)
+		}
+	}
 	t.Log.Info("shutting down; tearing down datapath")
-	// The parent context is already cancelled, so give Teardown a live one.
 	return t.DP.Teardown(context.Background())
 }

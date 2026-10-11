@@ -31,10 +31,74 @@ func (r *Reconciler) writeStatuses(ctx context.Context, res kreconcile.Result, h
 			firstErr = err
 		}
 	}
+	for key, st := range res.EgressStatus {
+		if err := r.writeEgress(ctx, key, st); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for name, contrib := range res.EgressClassStatus {
+		if err := r.writeEgressClass(ctx, name, contrib, hs); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if err := r.writeLinks(ctx, res.Links); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
+}
+
+// writeEgress writes the status of an Egress this node owns, under the
+// discipline writePortMap follows: re-read, merge, write only on a change.
+func (r *Reconciler) writeEgress(ctx context.Context, key types.NamespacedName, desired v1alpha1.EgressStatus) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var eg v1alpha1.Egress
+		if err := r.Client.Get(ctx, key, &eg); err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		next := eg.DeepCopy()
+		next.Status.Node = desired.Node
+		next.Status.Pods = desired.Pods
+		next.Status.ObservedGeneration = desired.ObservedGeneration
+		for _, c := range desired.Conditions {
+			meta.SetStatusCondition(&next.Status.Conditions, c)
+		}
+		if equality.Semantic.DeepEqual(eg.Status, next.Status) {
+			return nil
+		}
+		return r.Client.Status().Update(ctx, next)
+	})
+}
+
+// writeEgressClass writes this node's row into an EgressClass, with the MTU
+// figures read from the host, and the class conditions.
+func (r *Reconciler) writeEgressClass(ctx context.Context, name string, contrib kreconcile.EgressClassContribution, hs hostState) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var class v1alpha1.EgressClass
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: name}, &class); err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		next := class.DeepCopy()
+		row := contrib.Node
+		row.UnderlayMTU = int32(hs.underlayMTU)
+		row.LinkMTU = int32(hs.linkMTU)
+		upsertNodeRow(&next.Status.Nodes, row)
+		for _, c := range contrib.Conditions {
+			meta.SetStatusCondition(&next.Status.Conditions, c)
+		}
+		if next.Generation != 0 {
+			next.Status.ObservedGeneration = next.Generation
+		}
+		if equality.Semantic.DeepEqual(class.Status, next.Status) {
+			return nil
+		}
+		return r.Client.Status().Update(ctx, next)
+	})
 }
 
 // writeLinks makes this node's writes to the Link pool. Each one is the whole
