@@ -23,4 +23,11 @@ table inet kuport {
 		iifname "kup-da0d9a1d" counter ct mark set 0x6b700001
 		iifname "kup-e5b1c204" counter ct mark set 0x6b700002
 	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
 }

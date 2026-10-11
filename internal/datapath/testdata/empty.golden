@@ -11,4 +11,10 @@ table inet kuport {
 	chain kup-mangle {
 		type filter hook prerouting priority mangle + 10; policy accept;
 	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+	}
 }

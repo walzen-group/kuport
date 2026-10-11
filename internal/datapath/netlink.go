@@ -412,8 +412,10 @@ func applyRules(nl NetlinkConn, rules []IPRule) error {
 // names is reconciled in both, so a table that stopped carrying IPv6 loses
 // its IPv6 route while the IPv4 one stays.
 func applyRoutes(nl NetlinkConn, routes []Route) error {
-	byTable := map[uint32]map[Family][]*netlink.Route{}
-	var tables []uint32
+	// The blocked table is kuport's whether or not this plan uses it, so a
+	// blackhole left by an Egress that no longer fails closed is removed.
+	byTable := map[uint32]map[Family][]*netlink.Route{EgressBlockedTable: {}}
+	tables := []uint32{EgressBlockedTable}
 	for _, r := range routes {
 		nlr, err := toNLRoute(nl, r)
 		if err != nil {
@@ -504,6 +506,18 @@ func teardownNetlink(nl NetlinkConn) error {
 				}
 			}
 		}
+		blocked, err := nl.RouteListFiltered(afOf(fam), &netlink.Route{Table: int(EgressBlockedTable)}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			if ipv6Absent(err) {
+				continue
+			}
+			return err
+		}
+		for i := range blocked {
+			if err := nl.RouteDel(&blocked[i]); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -517,6 +531,9 @@ func toNLRule(r IPRule) *netlink.Rule {
 	nlr.Mark = r.Mark
 	nlr.Table = int(r.Table)
 	nlr.Family = afOf(r.Family)
+	if r.SuppressDefault {
+		nlr.SuppressPrefixlen = 0
+	}
 	if r.To != nil {
 		p := *r.To
 		nlr.Dst = &net.IPNet{
@@ -528,7 +545,20 @@ func toNLRule(r IPRule) *netlink.Rule {
 }
 
 // toNLRoute maps a kuport Route to a netlink route, resolving the device index.
+// A blackhole names no device.
 func toNLRoute(nl NetlinkConn, r Route) (*netlink.Route, error) {
+	if r.Blackhole {
+		dst := &net.IPNet{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)}
+		if r.family() == FamilyIPv6 {
+			dst = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
+		}
+		return &netlink.Route{
+			Table:  int(r.Table),
+			Type:   unix.RTN_BLACKHOLE,
+			Family: afOf(r.family()),
+			Dst:    dst,
+		}, nil
+	}
 	link, err := nl.LinkByName(r.Dev)
 	if err != nil {
 		return nil, err
@@ -554,8 +584,15 @@ func ruleEqual(a, b *netlink.Rule) bool {
 	if a.Priority != b.Priority || a.Mark != b.Mark || a.Table != b.Table {
 		return false
 	}
+	if suppressed(a) != suppressed(b) {
+		return false
+	}
 	return ipNetEqual(a.Dst, b.Dst)
 }
+
+// suppressed reports whether a rule carries suppress_prefixlength 0. The
+// library reads an absent attribute as -1, as NewRule sets it.
+func suppressed(r *netlink.Rule) bool { return r.SuppressPrefixlen == 0 }
 
 func ruleListed(list []netlink.Rule, want *netlink.Rule) bool {
 	for i := range list {
@@ -575,9 +612,17 @@ func ruleWanted(desired []*netlink.Rule, have *netlink.Rule) bool {
 	return false
 }
 
+// routeEqual compares the fields kuport sets. A blackhole names no device, and
+// the kernel lists an IPv6 one on lo, so blackholes compare by table alone; a
+// route list is filtered to one family before it is compared.
 func routeEqual(a, b *netlink.Route) bool {
+	if isBlackhole(a) || isBlackhole(b) {
+		return isBlackhole(a) == isBlackhole(b) && a.Table == b.Table
+	}
 	return a.Table == b.Table && a.LinkIndex == b.LinkIndex && a.Gw.Equal(b.Gw)
 }
+
+func isBlackhole(r *netlink.Route) bool { return r.Type == unix.RTN_BLACKHOLE }
 
 func routeListed(list []netlink.Route, want *netlink.Route) bool {
 	for i := range list {

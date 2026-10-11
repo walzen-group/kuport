@@ -1,0 +1,27 @@
+table inet kuport {
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		iifname "kup-3" ct direction original counter masquerade
+		iifname "kup-4" ct direction original counter masquerade
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+		ct direction reply ct mark 0x6b700003 counter meta mark set ct mark
+		ct direction reply ct mark 0x6b700004 counter meta mark set ct mark
+		iifname "kup-3" counter ct mark set 0x6b700003
+		iifname "kup-4" counter ct mark set 0x6b700004
+	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
+}

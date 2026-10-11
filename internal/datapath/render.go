@@ -14,6 +14,29 @@ const (
 	ChainPre    = "kup-pre"
 	ChainPost   = "kup-post"
 	ChainMangle = "kup-mangle"
+	ChainEgress = "kup-egress"
+	ChainMSS    = "kup-mss"
+)
+
+// clusterSet names the set of a family's in-cluster destinations, which an
+// egress rule leaves alone.
+func clusterSet(f Family) string {
+	if f == FamilyIPv6 {
+		return "kup-cluster6"
+	}
+	return "kup-cluster4"
+}
+
+// linkWildcard matches every kuport link device.
+const linkWildcard = "kup-*"
+
+// CtDirection is a conntrack direction a rule matches.
+type CtDirection int
+
+const (
+	CtDirAny CtDirection = iota
+	CtDirOriginal
+	CtDirReply
 )
 
 // steerMap names the map kup-steer looks a family's local addresses up in.
@@ -58,6 +81,11 @@ const (
 	// writes that address back onto the reply. A destination missing from the
 	// map is left alone.
 	KindSteer
+	// KindMasq masquerades a connection to the address of the interface it
+	// leaves by, on the egress node.
+	KindMasq
+	// KindMSS clamps the MSS of a SYN leaving by a link to the route's MTU.
+	KindMSS
 )
 
 // Rule is one nftables rule described by semantic fields rather than by
@@ -77,8 +105,16 @@ type Rule struct {
 	PortIsSrc bool        // match source port instead of destination
 	ToAddr    netip.Addr  // KindDNAT target address
 	ToPort    uint16      // KindDNAT target port; 0 keeps the matched port
-	Mark      uint32      // KindMark value
+	Mark      uint32      // KindMark and KindCtSave value
 	MapFamily Family      // KindSteer: whose map to look up
+
+	// DstOutsideCluster matches a destination outside the cluster set of the
+	// rule's family: ip daddr != @kup-cluster4.
+	DstOutsideCluster bool
+	// CtDir matches the packet's conntrack direction.
+	CtDir CtDirection
+	// CtMark matches the flow's conntrack mark when non-zero.
+	CtMark uint32
 }
 
 // family is the address family a rule is written for. ok is false for a rule
@@ -109,11 +145,15 @@ func familyOf(a netip.Addr) Family {
 // for the four kuport chains and the netlink objects. It is produced purely
 // from a State and never touches the host itself.
 type Plan struct {
-	Rules   []Rule  // ordered across the four chains
+	Rules   []Rule  // ordered across the chains
 	Steer   []Steer // the steer maps' entries, for steered families
 	Links   []Link
 	IPRules []IPRule
 	Routes  []Route
+
+	// Cluster holds each family's in-cluster destinations as merged address
+	// ranges, for the families an egress rule matches in.
+	Cluster map[Family][]AddrRange
 }
 
 // chainDef pins a chain's name and its nftables base-chain header line.
@@ -128,14 +168,23 @@ type chainDef struct {
 // the dstnat priority, so kup-pre's own priority only orders it among nat
 // chains. -120 puts kup-steer after conntrack (-200) and a mesh's mark rules
 // at mangle (-150), and before a host firewall's filter at -110.
+//
+// kup-egress runs at dstnat + 10, after kube-proxy translates a ClusterIP in nat
+// prerouting at -100, so a DNS query to the CoreDNS ClusterIP already carries
+// the CoreDNS pod's address and stays out of the egress rule. The kernel routes
+// after the whole prerouting hook, so a mark set there still selects the divert
+// rule. kup-mss clamps in forward, where both a pod's SYN and a remote SYN-ACK
+// pass on their way into a link.
 var chains = []chainDef{
 	{ChainSteer, "type filter hook prerouting priority dstnat - 20; policy accept;"},
 	{ChainPre, "type nat hook prerouting priority dstnat - 20; policy accept;"},
 	{ChainPost, "type nat hook postrouting priority srcnat - 10; policy accept;"},
 	{ChainMangle, "type filter hook prerouting priority mangle + 10; policy accept;"},
+	{ChainEgress, "type filter hook prerouting priority dstnat + 10; policy accept;"},
+	{ChainMSS, "type filter hook forward priority mangle; policy accept;"},
 }
 
-var chainOrder = map[string]int{ChainSteer: 0, ChainPre: 1, ChainPost: 2, ChainMangle: 3}
+var chainOrder = map[string]int{ChainSteer: 0, ChainPre: 1, ChainPost: 2, ChainMangle: 3, ChainEgress: 4, ChainMSS: 5}
 
 // Render turns a desired State into an ordered Plan. It is deterministic: two
 // calls on the same State, whatever the map iteration order upstream, produce a
@@ -242,7 +291,42 @@ func Render(s State) Plan {
 		})
 	}
 
+	// The pod's node: a connection the pod opened toward a destination outside
+	// the cluster carries the mark the routing rules select its path by.
+	egressFams := map[Family]bool{}
+	for _, e := range s.Egress {
+		src := e.SrcAddr
+		rules = append(rules, Rule{
+			Chain: ChainEgress, Kind: KindMark, SrcAddr: &src,
+			DstOutsideCluster: true, CtDir: CtDirOriginal, Mark: e.Mark,
+		})
+		egressFams[familyOf(src)] = true
+	}
+
+	// The egress node: the first packet of a flow from the link writes the
+	// link's mark into conntrack, the reply restores it after conntrack, and
+	// the nat hook masquerades the flow out of whichever uplink it routes to.
+	for _, g := range s.EgressGateway {
+		rules = append(rules,
+			Rule{Chain: ChainMangle, Kind: KindCtSave, IifName: g.Iface, Mark: g.Mark},
+			Rule{Chain: ChainMangle, Kind: KindCtLoad, CtDir: CtDirReply, CtMark: g.Mark},
+			Rule{Chain: ChainPost, Kind: KindMasq, IifName: g.Iface, CtDir: CtDirOriginal},
+		)
+	}
+
+	if len(s.Links) > 0 {
+		rules = append(rules, Rule{Chain: ChainMSS, Kind: KindMSS, OifName: linkWildcard})
+	}
+
 	sortRules(rules)
+
+	var cluster map[Family][]AddrRange
+	for f := range egressFams {
+		if cluster == nil {
+			cluster = map[Family][]AddrRange{}
+		}
+		cluster[f] = mergeRanges(s.ClusterCIDRs, f)
+	}
 
 	links := append([]Link(nil), s.Links...)
 	sort.Slice(links, func(i, j int) bool { return links[i].Name < links[j].Name })
@@ -274,7 +358,55 @@ func Render(s State) Plan {
 		return a.Via.String() < b.Via.String()
 	})
 
-	return Plan{Rules: rules, Steer: steer, Links: links, IPRules: iprules, Routes: routes}
+	return Plan{Rules: rules, Steer: steer, Links: links, IPRules: iprules, Routes: routes, Cluster: cluster}
+}
+
+// AddrRange is an inclusive address range, the form an nftables interval set
+// stores.
+type AddrRange struct {
+	First, Last netip.Addr
+}
+
+// mergeRanges turns a family's prefixes into sorted, non-overlapping ranges. An
+// interval set refuses an element that overlaps another, and adjacent ranges
+// are joined so the set holds the fewest elements.
+func mergeRanges(prefixes []netip.Prefix, f Family) []AddrRange {
+	var rs []AddrRange
+	for _, p := range prefixes {
+		p = p.Masked()
+		if !p.IsValid() || familyOf(p.Addr()) != f {
+			continue
+		}
+		rs = append(rs, AddrRange{First: p.Addr(), Last: lastAddr(p)})
+	}
+	sort.Slice(rs, func(i, j int) bool { return rs[i].First.Less(rs[j].First) })
+	var out []AddrRange
+	for _, r := range rs {
+		if n := len(out); n > 0 {
+			prev := &out[n-1]
+			// Join r when it starts at or before the address after prev ends.
+			// Next is invalid past the family's last address, which nothing
+			// can start after.
+			if next := prev.Last.Next(); !next.IsValid() || !next.Less(r.First) {
+				if prev.Last.Less(r.Last) {
+					prev.Last = r.Last
+				}
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// lastAddr is the highest address a prefix holds.
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Addr().AsSlice()
+	for i := p.Bits(); i < len(b)*8; i++ {
+		b[i/8] |= 0x80 >> (i % 8)
+	}
+	a, _ := netip.AddrFromSlice(b)
+	return a
 }
 
 // selText is a port selection as a sort and dedupe key.
@@ -305,7 +437,16 @@ func sortRules(rules []Rule) {
 		if af, bf := familyKey(a), familyKey(b); af != bf {
 			return af < bf
 		}
-		return dstKey(a) < dstKey(b)
+		if ad, bd := dstKey(a), dstKey(b); ad != bd {
+			return ad < bd
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.CtMark != b.CtMark {
+			return a.CtMark < b.CtMark
+		}
+		return a.Mark < b.Mark
 	})
 }
 

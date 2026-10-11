@@ -30,6 +30,27 @@ func (p Plan) String() string {
 		fmt.Fprintf(&b, "\t\telements = { %s }\n", strings.Join(elems, ", "))
 		b.WriteString("\t}\n")
 	}
+	for _, f := range []Family{FamilyIPv4, FamilyIPv6} {
+		rs, ok := p.Cluster[f]
+		if !ok {
+			continue
+		}
+		typ := "ipv4_addr"
+		if f == FamilyIPv6 {
+			typ = "ipv6_addr"
+		}
+		fmt.Fprintf(&b, "\tset %s {\n", clusterSet(f))
+		fmt.Fprintf(&b, "\t\ttype %s\n", typ)
+		b.WriteString("\t\tflags interval\n")
+		if len(rs) > 0 {
+			var elems []string
+			for _, r := range rs {
+				elems = append(elems, rangeText(r))
+			}
+			fmt.Fprintf(&b, "\t\telements = { %s }\n", strings.Join(elems, ", "))
+		}
+		b.WriteString("\t}\n")
+	}
 	for _, c := range chains {
 		fmt.Fprintf(&b, "\tchain %s {\n", c.name)
 		fmt.Fprintf(&b, "\t\t%s\n", c.header)
@@ -77,6 +98,14 @@ func nftText(r Rule) string {
 	if r.DstAddr != nil {
 		fmt.Fprintf(&b, "%s daddr %s ", l3Text(familyOf(*r.DstAddr)), r.DstAddr.String())
 	}
+	if r.DstOutsideCluster {
+		fmt.Fprintf(&b, "%s daddr != @%s ", l3Text(fam), clusterSet(fam))
+	}
+
+	if r.Kind == KindMSS {
+		b.WriteString("tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu")
+		return b.String()
+	}
 
 	if r.Port.Proto != "" {
 		sel := "dport"
@@ -84,6 +113,16 @@ func nftText(r Rule) string {
 			sel = "sport"
 		}
 		fmt.Fprintf(&b, "%s %s %s ", r.Port.Proto, sel, portText(r.Port))
+	}
+
+	switch r.CtDir {
+	case CtDirOriginal:
+		b.WriteString("ct direction original ")
+	case CtDirReply:
+		b.WriteString("ct direction reply ")
+	}
+	if r.CtMark != 0 {
+		fmt.Fprintf(&b, "ct mark 0x%x ", r.CtMark)
 	}
 
 	switch r.Kind {
@@ -109,8 +148,25 @@ func nftText(r Rule) string {
 		b.WriteString("counter meta mark set ct mark")
 	case KindSteer:
 		fmt.Fprintf(&b, "%s daddr set %s daddr map @%s counter", l3Text(fam), l3Text(fam), steerMap(fam))
+	case KindMasq:
+		b.WriteString("counter masquerade")
 	}
 	return b.String()
+}
+
+// rangeText renders an interval set element the way nft lists it: a single
+// address, a prefix when the range is exactly one, or first-last.
+func rangeText(r AddrRange) string {
+	if r.First == r.Last {
+		return r.First.String()
+	}
+	for bits := 0; bits <= r.First.BitLen(); bits++ {
+		p := netip.PrefixFrom(r.First, bits)
+		if p.Masked().Addr() == r.First && lastAddr(p) == r.Last {
+			return p.String()
+		}
+	}
+	return r.First.String() + "-" + r.Last.String()
 }
 
 // addrText renders an address held as 4 or 16 network-order bytes.

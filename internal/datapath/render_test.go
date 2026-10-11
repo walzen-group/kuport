@@ -202,7 +202,79 @@ func cases() []dpCase {
 		},
 	}
 
+	// egress-pod-node: two pods an Egress selects on this node. pod leaves
+	// through the link in both families; blocked's path is down and its Egress
+	// fails closed, so its default-route traffic reaches a blackhole. The
+	// cluster's prefixes include two adjacent pod CIDRs, which the set holds
+	// as one range.
+	blocked := netip.MustParseAddr("10.244.18.9")
+	egressPodNode := State{
+		Exempt: []ExemptRule{
+			{OifName: "kup-3", SrcAddr: &src},
+			{OifName: "kup-3", SrcAddr: &src6},
+		},
+		Egress: []EgressRule{
+			{SrcAddr: pod, Mark: 0x6b700003},
+			{SrcAddr: pod6, Mark: 0x6b700003},
+			{SrcAddr: blocked, Mark: EgressBlockedMark},
+		},
+		ClusterCIDRs: []netip.Prefix{
+			netip.MustParsePrefix("10.244.18.0/24"),
+			netip.MustParsePrefix("10.244.19.0/24"),
+			netip.MustParsePrefix("100.64.0.2/32"),
+			netip.MustParsePrefix("203.0.113.9/32"),
+			netip.MustParsePrefix("fd00:10:244:12::/64"),
+		},
+		Links: []Link{{
+			Name: "kup-3", VNI: 7003, Port: 4790,
+			LocalAddr:  netip.MustParseAddr("100.64.0.2"),
+			RemoteAddr: acceptAddr,
+			LinkAddr:   netip.MustParsePrefix("169.254.64.7/31"),
+			LinkAddr6:  netip.MustParsePrefix("fd64:f5ac:e961::1:7/127"),
+		}},
+		Rules: []IPRule{
+			{Pref: 32763, Mark: 0x6b700003, To: &acceptCIDR, Table: 254},
+			{Pref: 32764, Mark: 0x6b700003, Table: 254, SuppressDefault: true},
+			{Pref: 32764, Mark: 0x6b700003, Table: 254, SuppressDefault: true, Family: FamilyIPv6},
+			{Pref: 32765, Mark: 0x6b700003, Table: 10003},
+			{Pref: 32765, Mark: 0x6b700003, Table: 10003, Family: FamilyIPv6},
+			{Pref: 32764, Mark: EgressBlockedMark, Table: 254, SuppressDefault: true},
+			{Pref: 32765, Mark: EgressBlockedMark, Table: EgressBlockedTable},
+		},
+		Routes: []Route{
+			{Table: 10003, Via: netip.MustParseAddr("169.254.64.6"), Dev: "kup-3"},
+			{Table: 10003, Via: netip.MustParseAddr("fd64:f5ac:e961::1:6"), Dev: "kup-3"},
+			{Table: EgressBlockedTable, Blackhole: true},
+		},
+	}
+
+	// egress-gateway: the egress node, with links from two pod nodes.
+	podNodeA := netip.MustParsePrefix("100.64.0.2/32")
+	podNodeB := netip.MustParsePrefix("100.64.0.3/32")
+	egressGateway := State{
+		EgressGateway: []EgressGatewayRule{
+			{Iface: "kup-4", Mark: 0x6b700004},
+			{Iface: "kup-3", Mark: 0x6b700003},
+		},
+		Links: []Link{
+			{Name: "kup-3", VNI: 7003, Port: 4790, LocalAddr: acceptAddr, RemoteAddr: podNodeA.Addr(), LinkAddr: netip.MustParsePrefix("169.254.64.6/31")},
+			{Name: "kup-4", VNI: 7004, Port: 4790, LocalAddr: acceptAddr, RemoteAddr: podNodeB.Addr(), LinkAddr: netip.MustParsePrefix("169.254.64.8/31")},
+		},
+		Rules: []IPRule{
+			{Pref: 101, Mark: 0x6b700003, To: &podNodeA, Table: 254},
+			{Pref: 102, Mark: 0x6b700003, Table: 10003},
+			{Pref: 101, Mark: 0x6b700004, To: &podNodeB, Table: 254},
+			{Pref: 102, Mark: 0x6b700004, Table: 10004},
+		},
+		Routes: []Route{
+			{Table: 10003, Via: netip.MustParseAddr("169.254.64.7"), Dev: "kup-3"},
+			{Table: 10004, Via: netip.MustParseAddr("169.254.64.9"), Dev: "kup-4"},
+		},
+	}
+
 	return []dpCase{
+		{name: "egress-pod-node", state: egressPodNode, wantExempt: 2, wantMark: 3, wantLinks: 1, wantRules: 7, wantRoutes: 3},
+		{name: "egress-gateway", state: egressGateway, wantCtSave: 2, wantCtLoad: 2, wantLinks: 2, wantRules: 4, wantRoutes: 2},
 		{name: "accepting-single-port", state: accepting(udp3000), wantDNAT: 2, wantExempt: 1},
 		{name: "accepting-dual-stack", state: acceptingDual, wantDNAT: 4, wantExempt: 2},
 		{name: "target-remote-dual-stack", state: targetRemoteDual, wantExempt: 2, wantMark: 2, wantLinks: 1, wantRules: 3, wantRoutes: 2},

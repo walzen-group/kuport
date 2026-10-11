@@ -15,6 +15,16 @@ type State struct {
 	Rules  []IPRule
 	Routes []Route
 
+	// Egress is what this node does with connections that pods an Egress
+	// selects open toward addresses outside ClusterCIDRs.
+	Egress []EgressRule
+	// EgressGateway is the egress node's half: masquerade what arrives on a
+	// link and route the replies back into it.
+	EgressGateway []EgressGatewayRule
+	// ClusterCIDRs are the destinations an egress rule leaves alone: every
+	// node's pod CIDRs and InternalIPs, in both families.
+	ClusterCIDRs []netip.Prefix
+
 	// LocalAddrs are the node's own addresses, the destinations a host
 	// firewall protects. A mapped packet addressed to one of them is steered
 	// past that firewall; steer.go says how.
@@ -81,6 +91,27 @@ type CtLoadRule struct {
 	Port    PortSel // matched as source port
 }
 
+// EgressRule runs on the node holding a pod an Egress selects, and marks only
+// connections the pod opened (ct direction original) toward a destination
+// outside ClusterCIDRs. The routing rules the mark selects sit after every
+// other policy rule and consult main with suppress_prefixlength 0 first, so a
+// destination with a more specific route keeps it, and only traffic bound for
+// the default route goes into the link to the egress node, or, under
+// EgressBlockedMark, into a blackhole.
+type EgressRule struct {
+	SrcAddr netip.Addr
+	Mark    uint32
+}
+
+// EgressGatewayRule runs on the egress node for one link from a pod node. It
+// masquerades the connections arriving on Iface to the address of the uplink
+// they leave by, writes Mark into their conntrack entries, and restores Mark
+// onto their replies, so the pref 102 rule routes each reply back into Iface.
+type EgressGatewayRule struct {
+	Iface string
+	Mark  uint32
+}
+
 // Link is one point-to-point VXLAN to a peer node. The underlay is IPv4; the
 // device carries IPv6 inside it when LinkAddr6 is set.
 type Link struct {
@@ -109,14 +140,36 @@ type IPRule struct {
 	To     *netip.Prefix // set only on the loop-guard rule
 	Table  uint32
 	Family Family
+	// SuppressDefault renders suppress_prefixlength 0: the lookup ignores a
+	// default route in Table and falls through to the next rule, so only a
+	// more specific route answers.
+	SuppressDefault bool
 }
 
-// Route is a return table's default route. Its family is the gateway's: an
-// IPv6 route goes via the peer's end of the /127.
+// Route is a table's default route: via a link's far end, or a blackhole that
+// drops whatever reaches it. A route via a gateway takes the gateway's family;
+// a blackhole names its family.
 type Route struct {
 	Table uint32
 	Via   netip.Addr
 	Dev   string
+
+	Blackhole       bool
+	BlackholeFamily Family
 }
 
-func (r Route) family() Family { return familyOf(r.Via) }
+func (r Route) family() Family {
+	if r.Blackhole {
+		return r.BlackholeFamily
+	}
+	return familyOf(r.Via)
+}
+
+// EgressBlockedTable holds the blackhole default routes a blocked Egress pod's
+// traffic reaches, and EgressBlockedMark selects it. Both sit outside every
+// link slot's numbers, and kuport owns the table: Apply reconciles it on
+// every pass and Teardown empties it.
+const (
+	EgressBlockedTable uint32 = 11024
+	EgressBlockedMark  uint32 = 0x6b70f000
+)

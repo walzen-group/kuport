@@ -71,7 +71,53 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityMangle + 10),
 			Policy:   &accept,
 		},
+		{
+			Name:     ChainEgress,
+			Table:    t,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookPrerouting,
+			Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest + 10),
+			Policy:   &accept,
+		},
+		{
+			Name:     ChainMSS,
+			Table:    t,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookForward,
+			Priority: nftables.ChainPriorityMangle,
+			Policy:   &accept,
+		},
 	}
+}
+
+// nftClusterSets returns the interval set of in-cluster destinations for each
+// family the plan's egress rules match in. An interval set stores a range as
+// its first address and, flagged as the interval's end, the address after its
+// last; a range ending at the family's last address has no end element.
+func nftClusterSets(t *nftables.Table, cluster map[Family][]AddrRange) []nftMap {
+	var out []nftMap
+	for _, f := range []Family{FamilyIPv4, FamilyIPv6} {
+		rs, ok := cluster[f]
+		if !ok {
+			continue
+		}
+		var elems []nftables.SetElement
+		for _, r := range rs {
+			elems = append(elems, nftables.SetElement{Key: addrBytes(r.First)})
+			if end := r.Last.Next(); end.IsValid() {
+				elems = append(elems, nftables.SetElement{Key: addrBytes(end), IntervalEnd: true})
+			}
+		}
+		typ := nftables.TypeIPAddr
+		if f == FamilyIPv6 {
+			typ = nftables.TypeIP6Addr
+		}
+		out = append(out, nftMap{
+			set:   &nftables.Set{Table: t, Name: clusterSet(f), Interval: true, KeyType: typ},
+			elems: elems,
+		})
+	}
+	return out
 }
 
 // nftMaps returns the steer map of each family the plan steers, with its
@@ -143,6 +189,18 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 	if r.DstAddr != nil {
 		e = append(e, ipCmp(*r.DstAddr, false)...)
 	}
+	if r.DstOutsideCluster {
+		offset, length := addrLoad(fam, false)
+		set := lookupSet(sets, clusterSet(fam))
+		e = append(e,
+			&expr.Payload{OperationType: expr.PayloadLoad, DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: offset, Len: length},
+			&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID, Invert: true},
+		)
+	}
+
+	if r.Kind == KindMSS {
+		return append(e, mssExprs()...)
+	}
 
 	// Match the L4 protocol, then the port (source or destination). A rule with
 	// no protocol matches every flow arriving on its interface, which is what
@@ -154,6 +212,19 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{protoNum(r.Port.Proto)}},
 		)
 		e = append(e, portMatch(r.Port, r.PortIsSrc)...)
+	}
+
+	switch r.CtDir {
+	case CtDirOriginal:
+		e = append(e, ctDirExprs(ipCtDirOriginal)...)
+	case CtDirReply:
+		e = append(e, ctDirExprs(ipCtDirReply)...)
+	}
+	if r.CtMark != 0 {
+		e = append(e,
+			&expr.Ct{Key: expr.CtKeyMARK, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(r.CtMark)},
+		)
 	}
 
 	// The rewrite comes before the counter, so a lookup that misses ends the
@@ -176,8 +247,46 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 		e = append(e, ctSaveExprs(r.Mark)...)
 	case KindCtLoad:
 		e = append(e, ctLoadExprs()...)
+	case KindMasq:
+		e = append(e, &expr.Masq{})
 	}
 	return e
+}
+
+// The kernel's enum ip_conntrack_dir, which the ct direction key yields.
+const (
+	ipCtDirOriginal uint8 = 0
+	ipCtDirReply    uint8 = 1
+)
+
+// ctDirExprs matches the packet's conntrack direction, a one-byte value.
+func ctDirExprs(dir uint8) []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeyDIRECTION, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{dir}},
+	}
+}
+
+// tcpFlagsOffset is where the TCP header keeps its flags byte.
+const tcpFlagsOffset = 13
+
+// mssExprs is `tcp flags syn / syn,rst counter tcp option maxseg size set rt
+// mtu`, in the expressions nft emits for it: a SYN without RST gets its MSS
+// option rewritten to what the route's MTU allows. The route lookup yields the
+// MSS in host order and the option holds it in network order, hence the
+// byteorder conversion.
+func mssExprs() []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		&expr.Payload{OperationType: expr.PayloadLoad, DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: tcpFlagsOffset, Len: 1},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 1, Mask: []byte{0x02 | 0x04}, Xor: []byte{0x00}},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x02}},
+		&expr.Counter{},
+		&expr.Rt{Register: 1, Key: expr.RtTCPMSS},
+		&expr.Byteorder{SourceRegister: 1, DestRegister: 1, Op: expr.ByteorderHton, Len: 2, Size: 2},
+		&expr.Exthdr{SourceRegister: 1, Type: unix.TCPOPT_MAXSEG, Offset: 2, Len: 2, Op: expr.ExthdrOpTcpopt},
+	}
 }
 
 // Byte offsets into the IPv4 and IPv6 headers for the source and destination
@@ -434,7 +543,7 @@ func applyNFT(conn NFTConn, plan Plan) error {
 	conn.AddTable(t)
 
 	sets := map[string]*nftables.Set{}
-	for _, m := range nftMaps(t, plan.Steer) {
+	for _, m := range append(nftMaps(t, plan.Steer), nftClusterSets(t, plan.Cluster)...) {
 		if err := conn.AddSet(m.set, m.elems); err != nil {
 			return fmt.Errorf("add map %s: %w", m.set.Name, err)
 		}

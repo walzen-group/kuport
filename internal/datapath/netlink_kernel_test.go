@@ -107,8 +107,8 @@ func applyIPv6RealKernel(t *testing.T) {
 	if tables := kuportTables(t, conn); !reflect.DeepEqual(tables, []string{"inet"}) {
 		t.Errorf("kuport tables after apply = %v, want [inet]: the ip table is migrated away", tables)
 	}
-	if n := inetRuleCount(t, conn); n != 4 {
-		t.Errorf("rules in table inet kuport = %d, want 4 (two exemptions, two marks)", n)
+	if n := inetRuleCount(t, conn); n != 5 {
+		t.Errorf("rules in table inet kuport = %d, want 5 (two exemptions, two marks, the MSS clamp)", n)
 	}
 
 	link, err := nl.LinkByName("kup-da0d9a1d")

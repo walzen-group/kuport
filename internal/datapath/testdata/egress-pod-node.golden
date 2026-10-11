@@ -1,0 +1,36 @@
+table inet kuport {
+	set kup-cluster4 {
+		type ipv4_addr
+		flags interval
+		elements = { 10.244.18.0/23, 100.64.0.2, 203.0.113.9 }
+	}
+	set kup-cluster6 {
+		type ipv6_addr
+		flags interval
+		elements = { fd00:10:244:12::/64 }
+	}
+	chain kup-steer {
+		type filter hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-pre {
+		type nat hook prerouting priority dstnat - 20; policy accept;
+	}
+	chain kup-post {
+		type nat hook postrouting priority srcnat - 10; policy accept;
+		oifname "kup-3" ip saddr 10.244.18.107 counter snat ip to ip saddr
+		oifname "kup-3" ip6 saddr fd00:10:244:12::6b counter snat ip6 to ip6 saddr
+	}
+	chain kup-mangle {
+		type filter hook prerouting priority mangle + 10; policy accept;
+	}
+	chain kup-egress {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+		ip saddr 10.244.18.107 ip daddr != @kup-cluster4 ct direction original counter meta mark set 0x6b700003
+		ip saddr 10.244.18.9 ip daddr != @kup-cluster4 ct direction original counter meta mark set 0x6b70f000
+		ip6 saddr fd00:10:244:12::6b ip6 daddr != @kup-cluster6 ct direction original counter meta mark set 0x6b700003
+	}
+	chain kup-mss {
+		type filter hook forward priority mangle; policy accept;
+		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
+	}
+}
