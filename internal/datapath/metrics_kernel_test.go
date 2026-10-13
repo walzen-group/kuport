@@ -120,6 +120,25 @@ func countsMappedTraffic(t *testing.T) {
 		}
 	}
 
+	// The plan holds no link, so kup-mss is empty, and ReadLive returns each
+	// counted chain's own rules: as many as the plan put there.
+	live, err := ReadLive(conn)
+	if err != nil {
+		t.Fatalf("read live counters: %v", err)
+	}
+	gotPer, wantPer := map[string]int{}, map[string]int{}
+	for _, l := range live {
+		gotPer[l.Chain]++
+	}
+	for _, r := range plan.Rules {
+		wantPer[r.Chain]++
+	}
+	for _, ch := range liveChains {
+		if gotPer[ch] != wantPer[ch] {
+			t.Errorf("ReadLive returned %d rules for %s, the plan has %d", gotPer[ch], ch, wantPer[ch])
+		}
+	}
+
 	// The agent folds the live counters before each Apply, which replaces the
 	// table and starts every counter at zero. Three more exchanges after it,
 	// and the totals hold all eight.
