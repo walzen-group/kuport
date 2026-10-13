@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -23,11 +24,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/walzen-group/kuport/internal/agent"
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
 	"github.com/walzen-group/kuport/internal/datapath"
+	"github.com/walzen-group/kuport/internal/metrics"
 )
 
 // version is injected at build time with -X main.version=<v>. It defaults to
@@ -54,6 +57,7 @@ type config struct {
 	resync      time.Duration
 	healthAddr  string
 	linkPort    uint16
+	metrics     metrics.BindConfig
 	showVersion bool
 }
 
@@ -68,15 +72,23 @@ func parseFlags(args []string, getenv func(string) string) config {
 	healthAddr := fs.String("health-addr", envOr(getenv, "HEALTH_ADDR", ":8081"), "address the health and readiness probes bind to")
 	linkPort := fs.Uint("link-port", uintOr(getenv, "LINK_PORT", 4790),
 		"UDP port of every return link; must differ from the CNI's tunnel port, 8472 for Cilium")
+	metricsBind := fs.String("metrics-bind", getenv("METRICS_BIND"),
+		"where /metrics listens: empty for the node's InternalIP (HOST_IP), an interface name such as wt0, or off")
+	metricsPort := fs.Uint("metrics-port", uintOr(getenv, "METRICS_PORT", 9790), "TCP port of /metrics")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	_ = fs.Parse(args)
 
 	return config{
-		nodeName:    *nodeName,
-		logLevel:    *logLevel,
-		resync:      *resync,
-		healthAddr:  *healthAddr,
-		linkPort:    uint16(*linkPort),
+		nodeName:   *nodeName,
+		logLevel:   *logLevel,
+		resync:     *resync,
+		healthAddr: *healthAddr,
+		linkPort:   uint16(*linkPort),
+		metrics: metrics.BindConfig{
+			Bind:   *metricsBind,
+			HostIP: getenv("HOST_IP"),
+			Port:   uint16(*metricsPort),
+		},
 		showVersion: *showVersion,
 	}
 }
@@ -165,15 +177,34 @@ func run(cfg config) error {
 	dp := agent.HostDatapath{Handles: handles, Counters: counters}
 
 	r := &agent.Reconciler{
-		Client:   mgr.GetClient(),
-		NodeName: cfg.nodeName,
-		DP:       dp,
-		Host:     agent.NewHost(mgr.GetAPIReader(), handles.NL),
-		LinkPort: cfg.linkPort,
-		Log:      log.WithName("reconciler"),
+		Client:    mgr.GetClient(),
+		NodeName:  cfg.nodeName,
+		DP:        dp,
+		Host:      agent.NewHost(mgr.GetAPIReader(), handles.NL),
+		LinkPort:  cfg.linkPort,
+		Log:       log.WithName("reconciler"),
+		Totals:    counters,
+		Conntrack: datapath.HostConntrack,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up reconciler: %w", err)
+	}
+
+	// /metrics serves controller-runtime's registry, the controller's own
+	// series included, from listeners on the InternalIP or a named interface.
+	// controller-runtime's metrics server stays off: it binds one address.
+	if err := metrics.Register(ctrlmetrics.Registry, metrics.New(r)); err != nil {
+		return fmt.Errorf("register metrics: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}))
+	if err := mgr.Add(&metrics.Server{
+		Config:  cfg.metrics,
+		Lookup:  metrics.HostAddrs,
+		Handler: mux,
+		Log:     log.WithName("metrics"),
+	}); err != nil {
+		return fmt.Errorf("add metrics server: %w", err)
 	}
 
 	if err := mgr.Add(agent.TeardownRunnable{DP: dp, Keep: r.KeepState, Log: log.WithName("shutdown")}); err != nil {

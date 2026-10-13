@@ -44,6 +44,16 @@ spec:
               fieldPath: spec.nodeName
         - name: LOG_LEVEL
           value: "info"
+        # /metrics listens on the node's InternalIP only; with hostNetwork a
+        # wildcard bind would open it on every node address. METRICS_BIND
+        # takes an interface name such as wt0, or off.
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        ports:
+        - name: metrics
+          containerPort: 9790
         # NET_ADMIN is what lets it write nftables and netlink; privileged is
         # not needed. readOnlyRootFilesystem is safe because the image is a
         # static binary on scratch with nothing to write. No CPU limit:
