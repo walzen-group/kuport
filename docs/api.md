@@ -534,6 +534,12 @@ sets them.
 | --resync | RESYNC | 5m | informer resync period |
 | --health-addr | HEALTH_ADDR | :8081 | address of /healthz and /readyz |
 | --link-port | LINK_PORT | 4790 | UDP port of every return link |
+| --metrics-bind | METRICS_BIND | empty: the node's InternalIP from HOST_IP | where /metrics listens: an interface name such as wt0, or off |
+| --metrics-port | METRICS_PORT | 9790 | TCP port of /metrics |
+
+HOST_IP has no flag. The DaemonSet sets it from `status.hostIP`, and the agent
+listens there when `--metrics-bind` is empty. [metrics.md](metrics.md) covers the
+endpoint and every series.
 
 `--link-port` needs the same value on every node, because each end of a link
 sends to the port the other end listens on. It must differ from the CNI's tunnel

@@ -3,6 +3,17 @@
 Status: agreed with the admin on 2026-10-13 in conversation. One kuport release
 (v0.9.0) plus four infra changes, listed under Infra.
 
+## Changes made while building
+
+| Change | Why | Commit |
+| --- | --- | --- |
+| kup-count runs at postrouting priority filter (0) and matches the target's address and port in the header, with `ct direction` and `ct status dnat` | google/nftables v0.3.0 writes the ct direction attribute that `ct original proto-dst` and `ct reply ip saddr` need as 4 bytes where the kernel uses 1, and reading the rule back failed with `attribute 3 is not a uint32; length: 1`. The admin chose the header match on 2026-10-13 and accepted that two PortMaps on one target port share a counter | bc0af85 |
+| One `Counters` type holds a lock over the fold, the Apply and every read, in place of two fields on HostDatapath | A scrape between the fold and the table swap would have counted the old table twice | 48c795e |
+| Identical live keys in one read count once, at the larger value | Two PortMaps on one target port render two identical kup-count rules that count the same packets | 48c795e |
+| kup-pre's connection counter includes flows dialed straight to the pod on the accepting interface | The accepting rule matches any destination on its interface and port; the kernel test reads 11 new flows for 8 mapped and 3 direct exchanges | 48c795e |
+| `--metrics-bind` with an interface listens on every address on it but link-local ones | Only `lo` holds loopback addresses, and a listener there opens nothing to the network | 118813c |
+| The interface lookup lives in internal/datapath as `InterfaceAddrs`, over the agent's NetlinkConn | internal/datapath is the only package that reads or writes the host | v0.9.0 docs commit |
+
 ## Goal
 
 The admin opens one Grafana board to answer three questions:

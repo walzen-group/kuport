@@ -14,6 +14,7 @@ Start with [overview.md](overview.md) if you have not met it before.
 | write a PortMapClass, a PortMap, an EgressClass or an Egress | [api.md](api.md) |
 | know why a packet goes where it goes | [datapath.md](datapath.md) |
 | find out why a mapping or an Egress is not working | [troubleshooting.md](troubleshooting.md) |
+| scrape the agents and read their series | [metrics.md](metrics.md) |
 | install it into a cluster | [integration.md](integration.md) |
 | know why the design is shaped this way | [decisions.md](decisions.md) |
 | understand how the agents divide the work | [architecture.md](architecture.md) |
@@ -45,6 +46,10 @@ measurement that settled each one, including the four approaches to cross-node
 is not working: reading status, the counters, the failures that leave no log
 line, the host firewall, MTU, Egress paths and node rules, and what happens to
 host state when the agent moves.
+
+**[metrics.md](metrics.md)** is the /metrics endpoint each agent serves: where
+it listens, how Prometheus scrapes it, every series with its labels, and how
+kup-count, the totals across applies and the open-flow count work.
 
 **[integration.md](integration.md)** brings kuport into a cluster and sends a
 workload's outbound traffic through one node.

@@ -119,13 +119,21 @@ table inet kuport {
     oifname "<egress dev>" ip daddr <target> <proto> dport <target port> counter snat ip to ip saddr
     oifname "<egress dev>" ip6 daddr <target6> <proto> dport <target port> counter snat ip6 to ip6 saddr
   }
+
+  chain kup-count {
+    type filter hook postrouting priority filter; policy accept;
+    iifname "<iface>" ip daddr <target> <proto> dport <target port> ct direction original ct status dnat counter
+    oifname "<iface>" ip saddr <target> <proto> sport <target port> ct direction reply ct status dnat counter
+    ...two per kup-pre rule...
+  }
 }
 ```
 
 The `ip6` lines exist only for a mapping delivered over IPv6, which
 [IPv6](#ipv6) covers. kup-steer and the maps carry a mapping past a host
-firewall; [Host firewall](#host-firewall) walks a packet through them. The table
-also holds the chains kup-egress and kup-mss on every node, which
+firewall; [Host firewall](#host-firewall) walks a packet through them. kup-count
+only counts, for the metrics in [metrics.md](metrics.md#how-kup-count-counts).
+The table also holds the chains kup-egress and kup-mss on every node, which
 [Egress](#egress) and [MSS clamping](#mss-clamping) cover; the listings here
 leave them out.
 
@@ -195,6 +203,13 @@ table inet kuport {
   chain kup-mangle {
     type filter hook prerouting priority mangle + 10; policy accept;
     ...the return marking, which differs by serving mode...
+  }
+
+  chain kup-count {
+    type filter hook postrouting priority filter; policy accept;
+    iifname "kup-<n>" ip daddr <pod ip> <proto> dport <pod port> ct direction original ct status dnat counter
+    oifname "kup-<n>" ip saddr <pod ip> <proto> sport <pod port> ct direction reply ct status dnat counter
+    ...two per kup-pre rule...
   }
 }
 ```

@@ -124,6 +124,9 @@ kubectl delete -f chart/crds/
 | serviceAccount.create | true | Create the ServiceAccount |
 | serviceAccount.name | "" (fullname-agent) | Use this ServiceAccount name, created or pre-existing |
 | logLevel | info | Agent log level, passed as LOG_LEVEL |
+| linkPort | 4790 | UDP port of every return link, passed as LINK_PORT |
+| metrics.bind | "" (the node's InternalIP) | Where /metrics listens: an interface name such as wt0, or off. Passed as METRICS_BIND |
+| metrics.port | 9790 | TCP port of /metrics, passed as METRICS_PORT |
 | resources | 10m/32Mi requests, 128Mi memory limit | CPU limit is deliberately absent; see values.yaml |
 | tolerations | tolerate all | Taints the agent pod survives |
 | nodeSelector | {} | Extra node labels for running the agent |

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"time"
@@ -200,7 +201,7 @@ func run(cfg config) error {
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}))
 	if err := mgr.Add(&metrics.Server{
 		Config:  cfg.metrics,
-		Lookup:  metrics.HostAddrs,
+		Lookup:  func(name string) ([]netip.Addr, error) { return datapath.InterfaceAddrs(handles.NL, name) },
 		Handler: mux,
 		Log:     log.WithName("metrics"),
 	}); err != nil {

@@ -63,6 +63,8 @@ differently, install on a staging cluster first and walk
   with the measurement that confirmed it, and the serving modes.
 - [docs/troubleshooting.md](docs/troubleshooting.md): a mapping or an Egress is
   not working, and what every condition reason means.
+- [docs/metrics.md](docs/metrics.md): the /metrics endpoint on each node's
+  InternalIP and every series it serves.
 - [docs/integration.md](docs/integration.md): installing kuport into a specific
   cluster, written for whoever does the installing.
 

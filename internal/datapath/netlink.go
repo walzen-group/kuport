@@ -12,6 +12,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// InterfaceAddrs lists the addresses on a named interface, both families. The
+// metrics endpoint resolves --metrics-bind through it.
+func InterfaceAddrs(nl NetlinkConn, name string) ([]netip.Addr, error) {
+	l, err := nl.LinkByName(name)
+	if err != nil {
+		return nil, err
+	}
+	list, err := nl.AddrList(l, netlink.FAMILY_ALL)
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Addr
+	for _, a := range list {
+		if ip, ok := netip.AddrFromSlice(a.IP); ok {
+			out = append(out, ip.Unmap())
+		}
+	}
+	return out, nil
+}
+
 // linkPrefix is the name prefix every kuport VXLAN link carries, which is how
 // the reconcile recognises its own links without touching anyone else's.
 const linkPrefix = "kup-"

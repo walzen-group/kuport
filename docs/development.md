@@ -12,6 +12,7 @@ internal/reconcile/        the pure desired-state computation
 internal/agent/            informers, host checks, status writes, teardown
 internal/datapath/         nftables and netlink, the only package that touches the host
 internal/datapath/testdata golden rulesets
+internal/metrics/          the Prometheus collector and the /metrics listener
 config/crd/                generated CRD manifests
 config/samples/            a PortMapClass and a PortMap
 deploy/                    DaemonSet, ServiceAccount, ClusterRole, published per release

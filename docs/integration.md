@@ -85,8 +85,7 @@ node-to-node traffic needs; it fails only when the mesh filters UDP. Pick
 another port in that case and set it as the LINK_PORT environment variable on
 the agent DaemonSet, which the agent reads as `--link-port`. Every node needs
 the same port, because each end of a link sends to the port the other end
-listens on. The chart has no value for LINK_PORT, so a chart install that needs
-another port has to add the variable to the rendered DaemonSet.
+listens on. A chart install sets it with the `linkPort` value.
 
 ### Step 4: MTU headroom
 

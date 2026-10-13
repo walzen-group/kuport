@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/vishvananda/netlink"
 )
 
 // BindConfig says where the metrics endpoint listens. The agent runs with
@@ -59,25 +58,6 @@ func ResolveAddrs(c BindConfig, lookup func(string) ([]netip.Addr, error)) ([]ne
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("interface %s has no address to listen on", c.Bind)
-	}
-	return out, nil
-}
-
-// HostAddrs lists the addresses on a named interface, both families.
-func HostAddrs(name string) ([]netip.Addr, error) {
-	l, err := netlink.LinkByName(name)
-	if err != nil {
-		return nil, err
-	}
-	list, err := netlink.AddrList(l, netlink.FAMILY_ALL)
-	if err != nil {
-		return nil, err
-	}
-	var out []netip.Addr
-	for _, a := range list {
-		if ip, ok := netip.AddrFromSlice(a.IP); ok {
-			out = append(out, ip.Unmap())
-		}
 	}
 	return out, nil
 }
