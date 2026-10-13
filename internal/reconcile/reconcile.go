@@ -109,6 +109,9 @@ type Result struct {
 	// Keep is the state the agent leaves on the node when it stops: its
 	// fail-closed Egress pods held in the blackhole.
 	Keep datapath.State
+
+	// Metrics names the PortMap or Egress each entry of State serves.
+	Metrics MetricsIndex
 }
 
 // ClassContribution is one accepting node's contribution to a class's status.
@@ -236,6 +239,7 @@ func Compute(in Inputs) Result {
 	// State: the rules, links, marks and routes this node should hold.
 	buildState(&res.State, in, idx, mappings, egresses, alloc)
 	res.Keep = keepState(in, egresses)
+	res.Metrics = buildMetricsIndex(in, idx, mappings, egresses, alloc)
 
 	// Class status: this node's Nodes row and the class conditions.
 	buildClassStatus(&res, in, idx, alloc)
