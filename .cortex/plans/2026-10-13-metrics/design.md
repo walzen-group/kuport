@@ -61,16 +61,23 @@ controller-runtime binds a single address.
 Port 9790 was free on all six nodes on 2026-10-13 (`/proc/net/tcp` and
 `/proc/net/tcp6` read through talosctl).
 
-## Rule comments
+## Which object a rule serves
 
-Every rule the agent renders for a mapping or an Egress gets a comment naming
-its object: `comment "jellyfin/jellyfin"` for a PortMap, `comment
-"egress:qbittorrent/qbittorrent"` for an Egress. At scrape time the agent lists
-`table inet kuport` through the nftables library, reads each rule's counter and
-comment, and turns the pair into series. The comment survives an agent restart, and `nft list table inet
-kuport` becomes readable for a human.
+The admin's requirement: metrics read what kuport programs and leave the
+existing rules and State as they are. Rules carry no comment.
 
-Every golden under internal/datapath/testdata changes.
+The reconcile returns a `MetricsIndex` beside the State. It reruns the
+existing `emitMapping` per mapping and `emitEgressPodNode` per Egress pod into
+a scratch State and records which PortMap produced each DNAT entry, keyed by
+interface, protocol, port range and target, and which Egress and pod produced
+each egress entry, keyed by source address. At scrape time the agent lists
+`table inet kuport`, parses each kup-pre, kup-count and kup-egress rule back
+into those keys, and looks up the owner. A live rule with no owner, from a table
+the latest index does not describe yet, is skipped for that scrape.
+
+A kup-pre rule on the pod's node matches the stand-in of its link end, which
+Render writes, so the key leaves the rule's destination address out; the
+interface (`kup-<n>`) already tells the links apart.
 
 ## Counters across applies
 
@@ -81,7 +88,7 @@ zero several times a minute.
 
 Before each Apply the agent lists the live table's rules and adds each rule's
 packets and bytes to a running total held in memory, keyed by the series the
-rule feeds (comment, chain, interface, family, direction). A scrape reports the
+rule feeds (chain, interface, protocol, port range, target, family, direction). A scrape reports the
 running total plus what the live table has counted since the last Apply. The
 series reset only when the agent restarts, which Prometheus treats like any
 exporter restart. Packets arriving between the read and the table swap, a
@@ -100,8 +107,8 @@ chain, kup-count, counts both directions, two rules per DNAT rule:
 ```
 chain kup-count {
 	type filter hook postrouting priority srcnat + 10; policy accept;
-	iifname "enp1s0" meta l4proto tcp ct direction original ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter comment "jellyfin/jellyfin"
-	oifname "enp1s0" meta l4proto tcp ct direction reply ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter comment "jellyfin/jellyfin"
+	iifname "enp1s0" meta l4proto tcp ct direction original ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter
+	oifname "enp1s0" meta l4proto tcp ct direction reply ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter
 	...two per DNAT rule: one per interface per family per mapping...
 }
 ```
@@ -232,8 +239,8 @@ shaped for it instead. Grafana places the circles itself.
 
 | Test | What it checks |
 | --- | --- |
-| goldens | every rule carries its comment; kup-count renders one rule per kup-steer rule; `nft -c` accepts each ruleset |
-| collector unit test | canned rules, as the nftables library returns them with their counters and comments, and a canned conntrack dump turn into the series above, with `role` and `direction` right for an accepting node and a pod's node |
+| goldens | existing lines unchanged; kup-count renders two rules per DNAT rule; `nft -c` accepts each ruleset |
+| collector unit test | rules built with nftExprs and parsed back, with their counters, and a canned conntrack dump turn into the series above, with `role` and `direction` right for an accepting node and a pod's node |
 | kernel test | in the existing netns harness, UDP and TCP to a local and a remote mapping: both kup-count rules rise by the packets sent each way, `deliver` rises on the pod's node, and an unrelated DNAT flow on the same port with another target does not move kup-count |
 | counters across applies | in the netns harness: traffic, Apply, more traffic, scrape; the series holds both rounds |
 | bind test | the default binds HOST_IP only; an interface name binds its global addresses; a missing interface leaves the datapath reconciling and the listener retrying |
