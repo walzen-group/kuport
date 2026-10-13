@@ -72,29 +72,57 @@ kuport` becomes readable for a human.
 
 Every golden under internal/datapath/testdata changes.
 
+## Counters across applies
+
+`applyNFT` deletes and re-adds `table inet kuport` in one transaction, and the
+agent applies on every pass, which any watched change in the cluster starts, an
+EndpointSlice update included. Every nftables counter therefore restarts at
+zero several times a minute.
+
+Before each Apply the agent lists the live table's rules and adds each rule's
+packets and bytes to a running total held in memory, keyed by the series the
+rule feeds (comment, chain, interface, family, direction). A scrape reports the
+running total plus what the live table has counted since the last Apply. The
+series reset only when the agent restarts, which Prometheus treats like any
+exporter restart. Packets arriving between the read and the table swap, a
+window of microseconds, go uncounted.
+
+Apply keeps rewriting the whole table every pass: it also repairs a table
+someone flushed by hand, and skipping unchanged passes would lose that.
+
 ## Reply counter
 
-kup-steer counts a mapping's request packets, but no rule counts its replies. A
-new chain, kup-count, counts them on the way out, one rule per kup-steer rule:
+No rule counts a mapping's packets both ways. kup-steer's counter sits after
+its map lookup, so it misses a request to a routed virtual address under Multi,
+and render.go writes kup-steer rules only for a family with steer pairs. A new
+chain, kup-count, counts both directions, two rules per DNAT rule:
 
 ```
 chain kup-count {
 	type filter hook postrouting priority srcnat + 10; policy accept;
-	oifname "enp1s0" ct direction reply ct status dnat meta l4proto tcp ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter comment "jellyfin/jellyfin"
-	...one per interface per family per mapping, mirroring kup-steer...
+	iifname "enp1s0" meta l4proto tcp ct direction original ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter comment "jellyfin/jellyfin"
+	oifname "enp1s0" meta l4proto tcp ct direction reply ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter comment "jellyfin/jellyfin"
+	...two per DNAT rule: one per interface per family per mapping...
 }
 ```
 
 | Match | Why |
 | --- | --- |
-| `oifname` | the interface the request arrived on, so the reply series carries the same interface label as the request |
-| `ct direction reply`, `ct status dnat` | only replies of translated flows |
+| `iifname` on the request, `oifname` on the reply | the DNAT rule's interface, the one clients reach the node on, so both directions carry the same interface label |
+| `ct direction`, `ct status dnat` | one direction of a translated flow |
 | `ct original proto-dst` | the mapped port (or range) as the client dialed it |
 | `ct reply ip saddr` | the DNAT target: the pod on its own node, the link's far end on an accepting node with a remote pod. Pins the rule to kuport's own flows |
 
-The chain sits at postrouting after source NAT, so it counts replies that
-actually leave. It returns no verdict and changes no packet. On the pod's node
-the same rule shape counts replies leaving by `kup-<n>`.
+The chain sits at postrouting after source NAT, so it counts packets that
+actually leave the node: requests forwarded toward the pod or the link, replies
+forwarded toward the client. It returns no verdict and changes no packet. On the
+pod's node the same pair counts traffic over `kup-<n>`.
+
+The rule matches `ct reply ip saddr` through the generic conntrack source key
+with the reply direction, 16 bytes in an inet table, with an IPv4 address
+padded by 12 zero bytes. google/nftables v0.3.0 sends a direction only with
+that key. The text the goldens hold reads `ct reply ip saddr`, which nft -c
+accepts; the kernel test proves the applied expressions match.
 
 ## Metrics
 
@@ -104,7 +132,7 @@ the PodMonitor.
 | Metric | Type | Labels | Source |
 | --- | --- | --- | --- |
 | `kuport_mapping_info` | gauge, 1 | namespace, portmap, class, mode, protocol, port, endpoint_node | the agent's inputs |
-| `kuport_mapping_packets_total`, `kuport_mapping_bytes_total` | counter | namespace, portmap, interface, family, role, direction | kup-steer (request), kup-count (reply) |
+| `kuport_mapping_packets_total`, `kuport_mapping_bytes_total` | counter | namespace, portmap, interface, family, role, direction | kup-count |
 | `kuport_mapping_connections_total` | counter | namespace, portmap, interface, family, role | kup-pre, which sees a flow's first packet only |
 | `kuport_mapping_open_flows` | gauge | namespace, portmap, role | conntrack, see below |
 | `kuport_egress_packets_total`, `kuport_egress_bytes_total` | counter | namespace, egress, pod, family, path (link, blocked) | kup-egress |
@@ -138,8 +166,13 @@ accepting node.
 ### Open flows
 
 On each scrape the agent dumps the conntrack table once over netlink and counts
-entries with status DNAT whose original destination port and reply source
-match a mapping's kup-count rule. The test records the scrape time against a
+the flows a DNAT rule made: protocol and original destination port inside the
+rule's port selection, reply source equal to its target. netlink v1.3.1's
+ConntrackFlow carries no status field; a reply source that differs from the
+original destination is what DNAT means. A pod's node under Multi can hold an
+accepting rule and a link rule for the same pod and port; a flow whose original
+destination is a link's own end counts as `deliver`, every other flow as
+`accept`. The test records the scrape time against a
 table of 50000 entries. The agent caps the dump at 5 seconds, counts a dump that
 fails or runs over in `kuport_conntrack_dump_errors_total`, and leaves
 `kuport_mapping_open_flows` out of that scrape.
@@ -201,7 +234,8 @@ shaped for it instead. Grafana places the circles itself.
 | --- | --- |
 | goldens | every rule carries its comment; kup-count renders one rule per kup-steer rule; `nft -c` accepts each ruleset |
 | collector unit test | canned rules, as the nftables library returns them with their counters and comments, and a canned conntrack dump turn into the series above, with `role` and `direction` right for an accepting node and a pod's node |
-| kernel test | in the existing netns harness, UDP and TCP to a local and a remote mapping: the request counter and the kup-count counter both rise by the packets sent, `deliver` rises on the pod's node, and an unrelated DNAT flow on the same port with another target does not move kup-count |
+| kernel test | in the existing netns harness, UDP and TCP to a local and a remote mapping: both kup-count rules rise by the packets sent each way, `deliver` rises on the pod's node, and an unrelated DNAT flow on the same port with another target does not move kup-count |
+| counters across applies | in the netns harness: traffic, Apply, more traffic, scrape; the series holds both rounds |
 | bind test | the default binds HOST_IP only; an interface name binds its global addresses; a missing interface leaves the datapath reconciling and the listener retrying |
 | conntrack scale | dump and count 50000 entries; record the time |
 
