@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/walzen-group/kuport/internal/api/v1alpha1"
 	"github.com/walzen-group/kuport/internal/datapath"
+	"github.com/walzen-group/kuport/internal/metrics"
 	kreconcile "github.com/walzen-group/kuport/internal/reconcile"
 )
 
@@ -114,6 +116,15 @@ type Reconciler struct {
 	// keep is the state the last pass says to leave on the node when the
 	// agent stops: its fail-closed Egress pods held in the blackhole.
 	keep atomic.Pointer[datapath.State]
+
+	// Totals reads the live counters and their totals across applies for the
+	// metrics endpoint. The same Counters folds them in HostDatapath.Apply.
+	Totals *datapath.Counters
+	// Conntrack lists the node's conntrack table for the open-flow series.
+	Conntrack func() ([]*netlink.ConntrackFlow, error)
+
+	// snap is what the last successful apply programmed, for the collector.
+	snap atomic.Pointer[metrics.Snapshot]
 }
 
 // KeepState returns what to leave on the node at shutdown, the zero State
@@ -215,6 +226,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.applyState(ctx, res.State); err != nil {
 		return reconcile.Result{}, fmt.Errorf("apply datapath: %w", err)
 	}
+	r.recordApply(in, res)
 
 	hs := r.hostState(ctx, in)
 
@@ -231,7 +243,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 // so a change always leaves a line saying what was written.
 func (r *Reconciler) applyState(ctx context.Context, st datapath.State) error {
 	if err := r.DP.Apply(ctx, st); err != nil {
+		metrics.ApplyTotal.WithLabelValues("error").Inc()
 		return err
+	}
+	metrics.ApplyTotal.WithLabelValues("ok").Inc()
+	metrics.LastApplySuccess.SetToCurrentTime()
+	for kind, n := range map[string]int{
+		"dnat": len(st.DNAT), "exempt": len(st.Exempt), "mark": len(st.Mark),
+		"link": len(st.Links), "rule": len(st.Rules), "route": len(st.Routes),
+	} {
+		metrics.StateEntries.WithLabelValues(kind).Set(float64(n))
 	}
 	fp := fmt.Sprintf("%d dnat, %d exempt, %d mark, %d links, %d rules, %d routes",
 		len(st.DNAT), len(st.Exempt), len(st.Mark), len(st.Links), len(st.Rules), len(st.Routes))
