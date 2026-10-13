@@ -171,6 +171,10 @@ kube-state-metrics series to build on:
 
 ## Dashboard
 
+The board lives in the infra repo, at
+flux/templates/management/grafana/base/dashboards/kuport.json, next to the
+other boards Grafana's sidecar loads. The kuport repo ships no dashboard.
+
 Variables: `class`, `namespace`, `portmap`, `node`.
 
 | Row | Panels |
