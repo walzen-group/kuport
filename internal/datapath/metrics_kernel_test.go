@@ -119,6 +119,47 @@ func countsMappedTraffic(t *testing.T) {
 			t.Errorf("%s counted %d packets, want %d to %d", w.rule, n, w.min, w.max)
 		}
 	}
+
+	// The agent folds the live counters before each Apply, which replaces the
+	// table and starts every counter at zero. Three more exchanges after it,
+	// and the totals hold all eight.
+	counters := NewCounters(conn)
+	if err := counters.FoldAndApply(func() error {
+		return Apply(context.Background(), plan, Handles{NFT: conn, NL: realNetlink{}})
+	}); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if after := countRules(t, conn, plan)[`iifname "up0" ip daddr 10.0.0.2 udp dport 9987 ct direction original ct status dnat counter`]; after != 0 {
+		t.Errorf("request counter after the second apply = %d, want 0 (a fresh table)", after)
+	}
+	for i := range 3 {
+		inNs(t, client, func() { _, _, rerr = udpExchange(mapped) })
+		if rerr != nil {
+			t.Fatalf("udp exchange %d after the apply: %v", i, rerr)
+		}
+	}
+	totals, err := counters.Read()
+	if err != nil {
+		t.Fatalf("read counters: %v", err)
+	}
+	udp := PortSel{Proto: "udp", First: fwUDPPort, Last: fwUDPPort}
+	// kup-pre's accepting rule matches any destination on up0, so the three
+	// exchanges dialed straight to the pod are new flows there too. Their DNAT
+	// to the address they already carry changes no tuple, conntrack sets no
+	// dnat status, and kup-count leaves them out.
+	for _, w := range []struct {
+		name string
+		key  LiveKey
+		want uint64
+	}{
+		{"request", LiveKey{Chain: ChainCount, Iif: "up0", Family: FamilyIPv4, Proto: "udp", Port: udp, Dir: CtDirOriginal, Target: fwPod}, 8},
+		{"reply", LiveKey{Chain: ChainCount, Oif: "up0", Family: FamilyIPv4, Proto: "udp", Port: udp, Dir: CtDirReply, Target: fwPod}, 8},
+		{"new flows", LiveKey{Chain: ChainPre, Iif: "up0", Family: FamilyIPv4, Proto: "udp", Port: udp, Target: fwPod}, 11},
+	} {
+		if got := totals[w.key].Packets; got != w.want {
+			t.Errorf("%s total = %d packets, want %d; totals %v", w.name, got, w.want, totals)
+		}
+	}
 }
 
 // countRules reads kup-count from the kernel and returns each rule's packet

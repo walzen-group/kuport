@@ -110,13 +110,21 @@ func (l LiveRule) Key() LiveKey                                 // every field b
 type Totals struct{ … }
 func (t *Totals) Fold(live []LiveRule)
 func (t *Totals) Snapshot(live []LiveRule) map[LiveKey]CounterValue
+// Counters holds one lock over fold, Apply and read, so a scrape never reads
+// the old table after its counters were folded.
+type Counters struct{ … }
+func NewCounters(r CounterReader) *Counters
+func (c *Counters) FoldAndApply(apply func() error) error
+func (c *Counters) Read() (map[LiveKey]CounterValue, error)
 ```
 
-- [ ] Unit test `TestParseLiveRule`: build each rule kind with `nftExprs` (a kup-pre DNAT with a port range, both kup-count directions in IPv4 and IPv6, a kup-egress link mark and a blocked mark, kup-mss), wrap in `nftables.Rule{Exprs: …}` with a `*expr.Counter{Packets: 3, Bytes: 30}`, parse; every field equals the Rule it came from. This pins parse and render together.
-- [ ] Unit test `TestTotalsSurviveApplies`: fold 3/300, fold 2/200, snapshot with live 1/100 gives 6/600; a key only in totals keeps its value; a key only in live starts at its live value.
-- [ ] Implement the parser by walking expressions and remembering the last load (Meta key, Payload base and offset, Ct key and direction, Immediate register), then reading the following Cmp, Range or NAT.
-- [ ] HostDatapath gains `Totals *datapath.Totals` and `CounterReader datapath.CounterReader`; Apply reads live, folds, then calls `datapath.Apply` unchanged. A failed read skips the fold.
-- [ ] Kernel test extension: 5 exchanges, fold and Apply the same plan, 3 exchanges, snapshot: request and reply 8 each.
+As built, LiveRule embeds LiveKey. Identical keys in one read (two PortMaps on one target port) count once, at the larger value.
+
+- [x] Unit test `TestParseLiveRule`: build each rule kind with `nftExprs` (a kup-pre DNAT with a port range, both kup-count directions in IPv4 and IPv6, a kup-egress link mark and a blocked mark, kup-mss) with a counter of 3 packets and 30 bytes, parse; every field equals the Rule it came from. Mutation (reply target from daddr) fails it.
+- [x] Unit test `TestTotalsSurviveApplies`: fold 3/300, fold 2/200, snapshot with live 1/100 gives 6/600; a key only in totals keeps its value; a key only in live starts at its live value. `TestTotalsCountSharedRuleOnce` for identical keys.
+- [x] Implement the parser by walking expressions and remembering the last load (Meta key, Payload base and offset, Ct key), then reading the following Cmp, Range, NAT or mark set.
+- [x] HostDatapath gains `Counters *datapath.Counters`; Apply runs `datapath.Apply` unchanged inside FoldAndApply. A failed read skips the fold.
+- [x] Kernel test extension: 5 exchanges, fold and Apply the same plan (the request counter reads 0 after it), 3 exchanges, Read: request and reply 8 each, kup-pre new flows 11 (the 3 exchanges dialed straight to the pod are new flows on kup-pre's accepting rule, with no dnat status).
 
 **Check:**
 

@@ -13,11 +13,18 @@ import (
 // that needs NET_ADMIN; tests substitute a fake Datapath.
 type HostDatapath struct {
 	Handles datapath.Handles
+	// Counters, when set, folds the live counters into its totals before each
+	// Apply replaces the table.
+	Counters *datapath.Counters
 }
 
 // Apply renders the desired State and writes it to the host.
 func (d HostDatapath) Apply(ctx context.Context, state datapath.State) error {
-	return datapath.Apply(ctx, datapath.Render(state), d.Handles)
+	apply := func() error { return datapath.Apply(ctx, datapath.Render(state), d.Handles) }
+	if d.Counters == nil {
+		return apply()
+	}
+	return d.Counters.FoldAndApply(apply)
 }
 
 // Teardown removes everything kuport owns on this node.

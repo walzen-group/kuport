@@ -159,7 +159,10 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("open host handles: %w", err)
 	}
-	dp := agent.HostDatapath{Handles: handles}
+	// The real handles' nftables connection also lists rules with counters.
+	reader, _ := handles.NFT.(datapath.CounterReader)
+	counters := datapath.NewCounters(reader)
+	dp := agent.HostDatapath{Handles: handles, Counters: counters}
 
 	r := &agent.Reconciler{
 		Client:   mgr.GetClient(),
