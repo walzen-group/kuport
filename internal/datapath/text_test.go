@@ -123,6 +123,18 @@ func TestNFTText(t *testing.T) {
 			rule: Rule{Chain: ChainMangle, Kind: KindCtSave, IifName: "kup-da0d9a1d", Mark: 0x6b700001},
 			want: `iifname "kup-da0d9a1d" counter ct mark set 0x6b700001`,
 		},
+		{
+			// kup-count matches the request on the interface it arrived on, by
+			// the DNAT target's address and port, and counts it.
+			name: "count request",
+			rule: Rule{Chain: ChainCount, Kind: KindCount, IifName: "enp1s0", DstAddr: &dst, Port: PortSel{"tcp", 8096, 8096}, CtDir: CtDirOriginal},
+			want: `iifname "enp1s0" ip daddr 10.244.18.107 tcp dport 8096 ct direction original ct status dnat counter`,
+		},
+		{
+			name: "count reply range ipv6",
+			rule: Rule{Chain: ChainCount, Kind: KindCount, OifName: "wt0", SrcAddr: &src6, Port: PortSel{"udp", 27015, 27115}, PortIsSrc: true, CtDir: CtDirReply},
+			want: `oifname "wt0" ip6 saddr fd00:10:244:12::6b udp sport 27015-27115 ct direction reply ct status dnat counter`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -145,6 +157,8 @@ func TestTableHeaders(t *testing.T) {
 		"type nat hook postrouting priority srcnat - 10; policy accept;",
 		"chain kup-mangle {",
 		"type filter hook prerouting priority mangle + 10; policy accept;",
+		"chain kup-count {",
+		"type filter hook postrouting priority filter; policy accept;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("empty ruleset missing %q:\n%s", want, got)

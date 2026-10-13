@@ -47,6 +47,27 @@ func TestDNATExprsTranslatePort(t *testing.T) {
 	}
 }
 
+// TestRenderCountsTranslatedPort checks that a mapping translating 10002 to
+// 8096 counts on 8096, the port its packets carry in postrouting.
+func TestRenderCountsTranslatedPort(t *testing.T) {
+	s := State{DNAT: []DNATRule{
+		{Iface: "enp1s0", Port: PortSel{"tcp", 10002, 10002}, ToAddr: netip.MustParseAddr("10.244.5.5"), ToPort: 8096},
+	}}
+	var got []string
+	for _, r := range Render(s).Rules {
+		if r.Chain == ChainCount {
+			got = append(got, nftText(r))
+		}
+	}
+	want := []string{
+		`iifname "enp1s0" ip daddr 10.244.5.5 tcp dport 8096 ct direction original ct status dnat counter`,
+		`oifname "enp1s0" ip saddr 10.244.5.5 tcp sport 8096 ct direction reply ct status dnat counter`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("kup-count rules:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 // familyExprs is what the applied expressions of one rule say about its family:
 // the nfproto value it matches first, every network-header load as offset and
 // length, the width of the NAT target address, and the NAT family.

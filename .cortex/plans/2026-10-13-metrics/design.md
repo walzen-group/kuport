@@ -72,8 +72,10 @@ a scratch State and records which PortMap produced each DNAT entry, keyed by
 interface, protocol, port range and target, and which Egress and pod produced
 each egress entry, keyed by source address. At scrape time the agent lists
 `table inet kuport`, parses each kup-pre, kup-count and kup-egress rule back
-into those keys, and looks up the owner. A live rule with no owner, from a table
-the latest index does not describe yet, is skipped for that scrape.
+into those keys, and looks up the owner. A kup-count rule matches the target's
+port, so the index records each DNAT entry's target port range beside the
+dialed one. A live rule with no owner, from a table the latest index does not
+describe yet, is skipped for that scrape.
 
 A kup-pre rule on the pod's node matches the stand-in of its link end, which
 Render writes, so the key leaves the rule's destination address out; the
@@ -104,11 +106,13 @@ its map lookup, so it misses a request to a routed virtual address under Multi,
 and render.go writes kup-steer rules only for a family with steer pairs. A new
 chain, kup-count, counts both directions, two rules per DNAT rule:
 
+For a mapping of TCP 10002 to port 8096 on 10.244.18.186:
+
 ```
 chain kup-count {
-	type filter hook postrouting priority srcnat + 10; policy accept;
-	iifname "enp1s0" meta l4proto tcp ct direction original ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter
-	oifname "enp1s0" meta l4proto tcp ct direction reply ct status dnat ct original proto-dst 10002 ct reply ip saddr 10.244.18.186 counter
+	type filter hook postrouting priority filter; policy accept;
+	iifname "enp1s0" ip daddr 10.244.18.186 tcp dport 8096 ct direction original ct status dnat counter
+	oifname "enp1s0" ip saddr 10.244.18.186 tcp sport 8096 ct direction reply ct status dnat counter
 	...two per DNAT rule: one per interface per family per mapping...
 }
 ```
@@ -116,20 +120,27 @@ chain kup-count {
 | Match | Why |
 | --- | --- |
 | `iifname` on the request, `oifname` on the reply | the DNAT rule's interface, the one clients reach the node on, so both directions carry the same interface label |
-| `ct direction`, `ct status dnat` | one direction of a translated flow |
-| `ct original proto-dst` | the mapped port (or range) as the client dialed it |
-| `ct reply ip saddr` | the DNAT target: the pod on its own node, the link's far end on an accepting node with a remote pod. Pins the rule to kuport's own flows |
+| `ip daddr`, `dport` on the request; `ip saddr`, `sport` on the reply | the DNAT rule's target address and port (the translated port when the mapping translates), which both directions carry in their header at this priority |
+| `ct direction`, `ct status dnat` | one direction of a translated flow; a flow that reaches the pod's address with no DNAT stays uncounted |
 
-The chain sits at postrouting after source NAT, so it counts packets that
-actually leave the node: requests forwarded toward the pod or the link, replies
-forwarded toward the client. It returns no verdict and changes no packet. On the
-pod's node the same pair counts traffic over `kup-<n>`.
+The kernel writes the dialed address and port back onto a reply in the nat
+hook at srcnat (100). kup-count runs at filter (0) in postrouting, before that
+hook, so a reply still carries the target's address and port. At srcnat + 10
+the reply rule reads 0; the kernel test's mutation shows it. The chain counts
+packets that leave the node: requests forwarded toward the pod or the link,
+replies forwarded toward the client. It returns no verdict and changes no
+packet. On the pod's node the same pair counts traffic over `kup-<n>`.
 
-The rule matches `ct reply ip saddr` through the generic conntrack source key
-with the reply direction, 16 bytes in an inet table, with an IPv4 address
-padded by 12 zero bytes. google/nftables v0.3.0 sends a direction only with
-that key. The text the goldens hold reads `ct reply ip saddr`, which nft -c
-accepts; the kernel test proves the applied expressions match.
+Two PortMaps on one interface that map different ports to the same target
+address and port (10002 and 10003, both to 8096) render identical kup-count
+rules, and each PortMap's series reports the traffic of both. The admin
+accepted this on 2026-10-13.
+
+A match on the dialed port through `ct original proto-dst` would tell those two
+apart. google/nftables v0.3.0 encodes the conntrack direction attribute that
+match needs as 4 bytes where the kernel uses 1, and reading such a rule back
+fails with `attribute 3 is not a uint32; length: 1`. Upstream fixed it in
+8a8ad2be on main, after the last tag.
 
 ## Metrics
 
@@ -241,7 +252,7 @@ shaped for it instead. Grafana places the circles itself.
 | --- | --- |
 | goldens | existing lines unchanged; kup-count renders two rules per DNAT rule; `nft -c` accepts each ruleset |
 | collector unit test | rules built with nftExprs and parsed back, with their counters, and a canned conntrack dump turn into the series above, with `role` and `direction` right for an accepting node and a pod's node |
-| kernel test | in the existing netns harness, UDP and TCP to a local and a remote mapping: both kup-count rules rise by the packets sent each way, `deliver` rises on the pod's node, and an unrelated DNAT flow on the same port with another target does not move kup-count |
+| kernel test | in the existing netns harness, UDP and TCP to a local and a remote mapping: both kup-count rules rise by the packets sent each way, `deliver` rises on the pod's node, and a flow dialed straight to the pod's address and port, with no DNAT, does not move kup-count |
 | counters across applies | in the netns harness: traffic, Apply, more traffic, scrape; the series holds both rounds |
 | bind test | the default binds HOST_IP only; an interface name binds its global addresses; a missing interface leaves the datapath reconciling and the listener retrying |
 | conntrack scale | dump and count 50000 entries; record the time |

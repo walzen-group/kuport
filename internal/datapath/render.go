@@ -16,6 +16,7 @@ const (
 	ChainMangle = "kup-mangle"
 	ChainEgress = "kup-egress"
 	ChainMSS    = "kup-mss"
+	ChainCount  = "kup-count"
 )
 
 // clusterSet names the set of a family's in-cluster destinations, which an
@@ -86,6 +87,9 @@ const (
 	KindMasq
 	// KindMSS clamps the MSS of a SYN leaving by a link to the route's MTU.
 	KindMSS
+	// KindCount counts one direction of the flows a DNAT rule translates. It
+	// returns no verdict and changes no packet.
+	KindCount
 )
 
 // Rule is one nftables rule described by semantic fields rather than by
@@ -175,6 +179,10 @@ type chainDef struct {
 // after the whole prerouting hook, so a mark set there still selects the divert
 // rule. kup-mss clamps in forward, where both a pod's SYN and a remote SYN-ACK
 // pass on their way into a link.
+//
+// kup-count runs at filter (0) in postrouting, before the nat hook at srcnat
+// (100) writes the dialed address back onto a reply. Both directions of a
+// mapped flow still carry the DNAT target's address and port there.
 var chains = []chainDef{
 	{ChainSteer, "type filter hook prerouting priority dstnat - 20; policy accept;"},
 	{ChainPre, "type nat hook prerouting priority dstnat - 20; policy accept;"},
@@ -182,9 +190,10 @@ var chains = []chainDef{
 	{ChainMangle, "type filter hook prerouting priority mangle + 10; policy accept;"},
 	{ChainEgress, "type filter hook prerouting priority dstnat + 10; policy accept;"},
 	{ChainMSS, "type filter hook forward priority mangle; policy accept;"},
+	{ChainCount, "type filter hook postrouting priority filter; policy accept;"},
 }
 
-var chainOrder = map[string]int{ChainSteer: 0, ChainPre: 1, ChainPost: 2, ChainMangle: 3, ChainEgress: 4, ChainMSS: 5}
+var chainOrder = map[string]int{ChainSteer: 0, ChainPre: 1, ChainPost: 2, ChainMangle: 3, ChainEgress: 4, ChainMSS: 5, ChainCount: 6}
 
 // Render turns a desired State into an ordered Plan. It is deterministic: two
 // calls on the same State, whatever the map iteration order upstream, produce a
@@ -222,6 +231,19 @@ func Render(s State) Plan {
 			ToAddr:  d.ToAddr,
 			ToPort:  d.ToPort,
 		})
+		// kup-count counts both directions of the flows this DNAT rule
+		// translates, on the interface the client reaches the node by, by the
+		// target's address and port: the request carries them as destination,
+		// the reply as source.
+		to := d.ToAddr
+		toPort := d.Port
+		if d.ToPort != 0 {
+			toPort = PortSel{Proto: d.Port.Proto, First: d.ToPort, Last: d.ToPort}
+		}
+		rules = append(rules,
+			Rule{Chain: ChainCount, Kind: KindCount, IifName: d.Iface, DstAddr: &to, Port: toPort, CtDir: CtDirOriginal},
+			Rule{Chain: ChainCount, Kind: KindCount, OifName: d.Iface, SrcAddr: &to, Port: toPort, PortIsSrc: true, CtDir: CtDirReply},
+		)
 
 		fam := familyOf(d.ToAddr)
 		key := d.Iface + "|" + selText(d.Port) + "|" + nfprotoText(fam)

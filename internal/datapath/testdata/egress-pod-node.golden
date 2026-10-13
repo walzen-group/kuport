@@ -33,4 +33,7 @@ table inet kuport {
 		type filter hook forward priority mangle; policy accept;
 		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
 	}
+	chain kup-count {
+		type filter hook postrouting priority filter; policy accept;
+	}
 }

@@ -20,4 +20,11 @@ table inet kuport {
 	chain kup-mss {
 		type filter hook forward priority mangle; policy accept;
 	}
+	chain kup-count {
+		type filter hook postrouting priority filter; policy accept;
+		iifname "enp1s0" ip daddr 10.244.18.107 udp dport 3000 ct direction original ct status dnat counter
+		oifname "enp1s0" ip saddr 10.244.18.107 udp sport 3000 ct direction reply ct status dnat counter
+		iifname "wt0" ip daddr 10.244.18.107 udp dport 3000 ct direction original ct status dnat counter
+		oifname "wt0" ip saddr 10.244.18.107 udp sport 3000 ct direction reply ct status dnat counter
+	}
 }

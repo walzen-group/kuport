@@ -30,4 +30,11 @@ table inet kuport {
 		type filter hook forward priority mangle; policy accept;
 		oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu
 	}
+	chain kup-count {
+		type filter hook postrouting priority filter; policy accept;
+		iifname "kup-da0d9a1d" ip daddr 10.244.18.107 udp dport 3000 ct direction original ct status dnat counter
+		oifname "kup-da0d9a1d" ip saddr 10.244.18.107 udp sport 3000 ct direction reply ct status dnat counter
+		iifname "kup-e5b1c204" ip daddr 10.244.18.107 udp dport 3000 ct direction original ct status dnat counter
+		oifname "kup-e5b1c204" ip saddr 10.244.18.107 udp sport 3000 ct direction reply ct status dnat counter
+	}
 }

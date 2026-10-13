@@ -87,6 +87,14 @@ func nftChains(t *nftables.Table) []*nftables.Chain {
 			Priority: nftables.ChainPriorityMangle,
 			Policy:   &accept,
 		},
+		{
+			Name:     ChainCount,
+			Table:    t,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookPostrouting,
+			Priority: nftables.ChainPriorityFilter,
+			Policy:   &accept,
+		},
 	}
 }
 
@@ -201,7 +209,6 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 	if r.Kind == KindMSS {
 		return append(e, mssExprs()...)
 	}
-
 	// Match the L4 protocol, then the port (source or destination). A rule with
 	// no protocol matches every flow arriving on its interface, which is what
 	// the conntrack save rule wants: the link carries one mapping's traffic and
@@ -225,6 +232,9 @@ func nftExprs(r Rule, sets map[string]*nftables.Set) []expr.Any {
 			&expr.Ct{Key: expr.CtKeyMARK, Register: 1},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(r.CtMark)},
 		)
+	}
+	if r.Kind == KindCount {
+		e = append(e, ctStatusDNATExprs()...)
 	}
 
 	// The rewrite comes before the counter, so a lookup that misses ends the
@@ -264,6 +274,22 @@ func ctDirExprs(dir uint8) []expr.Any {
 	return []expr.Any{
 		&expr.Ct{Key: expr.CtKeyDIRECTION, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{dir}},
+	}
+}
+
+// ipsDstNAT is IPS_DST_NAT, the conntrack status bit of a flow whose
+// destination was translated.
+const ipsDstNAT uint32 = 1 << 5
+
+// ctStatusDNATExprs is `ct status dnat`: the flow's destination was
+// translated. A kup-count rule matches it so a pod's own traffic on the
+// target's port stays uncounted.
+func ctStatusDNATExprs() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeySTATUS, Register: 1},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4,
+			Mask: binaryutil.NativeEndian.PutUint32(ipsDstNAT), Xor: binaryutil.NativeEndian.PutUint32(0)},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
 	}
 }
 

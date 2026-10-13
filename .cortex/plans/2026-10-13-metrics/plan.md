@@ -25,7 +25,7 @@ Read before any task. Each fact broke something once or will if ignored.
 | netbird owns prefs 105 and 110; an Egress's rules sit at 32763-32765 | docs/datapath.md "Routing rule order" | a rule above netbird's takes netbird and LAN routes |
 | Conntrack records the dialed address at -200, before kup-steer rewrites it to a stand-in | docs/datapath.md "Host firewall" | a counter keyed on the packet's destination sees the stand-in |
 | On the pod's node, a kup-pre rule's `ip daddr` is the stand-in of the link end, written by Render | internal/datapath/render.go `Render` | matching a live kup-pre rule by its DstAddr fails; match by interface, port and DNAT target |
-| `ct … saddr` with a direction loads 16 bytes in an inet table, an IPv4 address padded with 12 zero bytes; google/nftables v0.3.0 sends a direction only with the generic key CtKeySRC | spec "Reply counter" | the reply counter compiles and never matches |
+| google/nftables v0.3.0 writes the ct direction attribute (`ct original …`, `ct reply …`) as 4 bytes where the kernel uses 1; reading the rule back fails with `attribute 3 is not a uint32; length: 1`. kup-count matches header fields at postrouting priority 0, before the reply's un-DNAT at 100 | spec "Reply counter" | every GetRules on the table fails, Apply included |
 | The agent runs with hostNetwork; a wildcard bind listens on a public uplink | deploy/daemonset.yaml | /metrics on the internet |
 | Goldens compare nftText, not the applied expressions; only the kernel tests (run under `unshare -rn`) prove behaviour | internal/datapath/text_test.go | a passing golden taken as proof of a working rule |
 | google/nftables lists a chain's rules in insertion order with their expressions and counters; a counter is `*expr.Counter{Packets, Bytes}` | rule.go `GetRules` | |
@@ -45,37 +45,37 @@ Read before any task. Each fact broke something once or will if ignored.
 1. A remote mapping counted on both nodes: `role="accept"` on the accepting node and `role="deliver"` on the pod's node; summing accept counts the client's traffic once. Task 2's kernel test asserts both.
 2. Twenty applies between two scrapes: totals keep every round. Task 2's kernel test applies between rounds.
 3. wt0 without an address at agent start: datapath reconciles, listener binds later. Task 6's retry test.
-4. An unrelated DNAT flow on the same port to another target: kup-count does not count it. Task 1's kernel test.
+4. A flow dialed straight to the pod's address and port, with no DNAT: kup-count does not count it. Task 1's kernel test.
 5. A port-range mapping: kup-count and the conntrack matcher take any port in the range. Tasks 1 and 3.
 
 ---
 
 ### Task 1: kup-count chain
 
-**Files:** internal/datapath/render.go, nft.go, text.go; tests text_test.go, render_test.go, new metrics_kernel_test.go; goldens.
+**Files:** internal/datapath/render.go, nft.go, text.go; tests text_test.go, steer_test.go, translate_test.go, new metrics_kernel_test.go; goldens.
 
-**Produces:** `ChainCount = "kup-count"`, `KindCount`, `Rule.CountTarget netip.Addr` (CtDir carries the direction; requests match `IifName`, replies `OifName`).
+**Produces:** `ChainCount = "kup-count"`, `KindCount`. A kup-count Rule uses the existing fields: the request sets `IifName`, `DstAddr` (the DNAT target), `Port` (the target's port: `ToPort` when the mapping translates, else the dialed range) and `CtDir: CtDirOriginal`; the reply sets `OifName`, `SrcAddr`, the same `Port` with `PortIsSrc` and `CtDir: CtDirReply`.
 
-- [ ] Text tests first (TestNFTText cases for a request rule, an IPv6 reply rule over a range; TestTableHeaders gains the kup-count header). Run, see them fail on the unknown names.
-- [ ] Render: chain `{ChainCount, "type filter hook postrouting priority srcnat + 10; policy accept;"}`, chainOrder 6; per DNAT rule append
+- [x] Text tests first (TestNFTText cases for a request rule, an IPv6 reply rule over a range; TestTableHeaders gains the kup-count header).
+- [x] Render: chain `{ChainCount, "type filter hook postrouting priority filter; policy accept;"}`, chainOrder 6; per DNAT rule append
 
   ```go
-  Rule{Chain: ChainCount, Kind: KindCount, IifName: d.Iface, CtDir: CtDirOriginal, Port: d.Port, CountTarget: d.ToAddr},
-  Rule{Chain: ChainCount, Kind: KindCount, OifName: d.Iface, CtDir: CtDirReply, Port: d.Port, CountTarget: d.ToAddr},
+  Rule{Chain: ChainCount, Kind: KindCount, IifName: d.Iface, DstAddr: &to, Port: toPort, CtDir: CtDirOriginal},
+  Rule{Chain: ChainCount, Kind: KindCount, OifName: d.Iface, SrcAddr: &to, Port: toPort, PortIsSrc: true, CtDir: CtDirReply},
   ```
 
-  `family()` returns `familyOf(r.CountTarget)` for KindCount; `dstKey` returns the target.
-- [ ] nft.go: kup-count chain object (filter, postrouting, `ChainPriorityNATSource + 10`); `countExprs`: l4proto, ct direction, `ct status & 0x20 != 0`, `CtKeyPROTODST` direction original against the port or range, `CtKeySRC` direction reply against the 16-byte padded target, counter. Keep the leading nfproto match nftExprs adds.
-- [ ] text.go: `[iifname|oifname] meta l4proto P ct direction D ct status dnat ct original proto-dst PORT ct reply ip[6] saddr T counter`; no leading `meta nfproto` for KindCount.
-- [ ] Kernel test `TestCountsMappedTrafficOnRealKernel` (client, node, pod netns from the firewall test's helpers): mapping UDP 9987 to the pod, and a second DNAT on UDP 9999 to the pod gateway for the unrelated flow. Send 5 exchanges; read kup-count with GetRules; request and reply counters read 5 each; the unrelated rule pair reads 0 for traffic to 9987 and counts its own flow only.
-- [ ] Mutation: compare a 4-byte target in countExprs, rerun, the reply counter reads 0; restore.
+- [x] nft.go: kup-count chain object (filter, postrouting, `ChainPriorityFilter`); the common path builds the match, and KindCount appends `ctStatusDNATExprs` (`ct status & 0x20 != 0`) before the counter.
+- [x] text.go: `[iifname|oifname] ip[6] daddr|saddr T proto dport|sport P ct direction D ct status dnat counter`.
+- [x] TestRenderCountsTranslatedPort: a 10002→8096 mapping counts on 8096. Mutation (dialed port) fails it.
+- [x] Kernel test `TestCountsMappedTrafficOnRealKernel` (client, node, pod netns from the firewall test's helpers): UDP 9987 to the pod and TCP 30033 translated to 8030. Five UDP exchanges read 5 on each UDP rule; the TCP pair reads at least 1 each on 8030; three UDP exchanges dialed straight to the pod's address leave the counters at 5.
+- [x] Mutations: kup-count at srcnat + 10 reads 0 on both reply rules; without `ct status dnat` the UDP rules read 8. Both restored.
 
 **Check:**
 
 ```sh
 nix develop --command go test ./internal/datapath -run 'TestNFTText|TestTableHeaders|TestGolden' -update
-git diff -U0 internal/datapath/testdata | grep '^[-+]' | grep -v '^+++\|^---' | grep -v 'kup-count\|ct original proto-dst\|^+\s*}$'
-for f in internal/datapath/testdata/*.golden; do unshare -rn nft -c -f "$f" || echo "FAIL $f"; done
+git diff -U0 internal/datapath/testdata | grep '^[-+]' | grep -v '^+++\|^---' | grep -v 'kup-count\|ct status dnat counter\|priority filter; policy accept;\|^+\s*}$'
+nix shell nixpkgs#nftables --command sh -c 'for f in internal/datapath/testdata/*.golden; do unshare -rn nft -c -f "$f" || echo "FAIL $f"; done'
 nix develop --command go test ./... -run 'RealKernel' -v 2>&1 | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP))'
 ```
 
@@ -98,7 +98,7 @@ type LiveRule struct {
 	Proto    string // "tcp", "udp", "" for none
 	Port     PortSel
 	Dir      CtDirection
-	Target   netip.Addr // kup-pre: DNAT target; kup-count: ct reply saddr
+	Target   netip.Addr // kup-pre: DNAT target; kup-count: ip daddr (request) or ip saddr (reply)
 	Src      netip.Addr // kup-egress: ip saddr
 	Mark     uint32     // kup-egress: mark set
 	Counter  CounterValue
@@ -218,7 +218,7 @@ var StateEntries *prometheus.GaugeVec   // {kind}
 var ConntrackDumpErrors prometheus.Counter
 ```
 
-Mapping a live rule to an owner: kup-count and kup-pre rules by `DNATKey{Iface: Iif or Oif, Proto, First, Last, Target}`; kup-egress by Src; kup-mss has none. A live rule with no owner is skipped (a table from a pass the index does not describe yet).
+Mapping a live rule to an owner: kup-pre rules by `DNATKey{Iface: Iif, Proto, First, Last, Target}` with the dialed range. kup-count rules match the target's port, so the collector builds a second map from `Snapshot.DNAT`: each entry's key with First and Last set to `ToPort` when it is non-zero, mapped to the owner of the entry's dialed key. Two owners on one count key (10002 and 10003 both to 8096) each get the rule's counter. kup-egress by Src; kup-mss has none. A live rule with no owner is skipped (a table from a pass the index does not describe yet).
 
 - [ ] `testutil.CollectAndCompare` per family: packets/bytes for accept request and reply, deliver on `kup-0`, connections from kup-pre, open flows, egress link and blocked, mss, link info, mapping info; a Flows error omits open flows and increments the dump-error counter.
 - [ ] Agent: Reconciler gains `Totals`, `CounterReader`, `snap atomic.Pointer[metrics.Snapshot]`; implements Source; stores the snapshot after a successful apply (Links from `in.Links` whose Spec.Peers holds this node, device `kup-<n>` from the name `slot-<n>`); applyState records ApplyTotal, LastApplySuccess, StateEntries.

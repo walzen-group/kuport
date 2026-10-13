@@ -86,6 +86,10 @@ func TestRenderSteersEachDNAT(t *testing.T) {
 		`kup-pre: meta nfproto ipv4 iifname "ens3" udp dport 9987 counter dnat ip to 10.244.18.107:9987`,
 		`kup-pre: iifname "kup-1" ip daddr 169.254.76.2 udp dport 9987 counter dnat ip to 10.244.18.107:9987`,
 		`kup-mss: oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set rt mtu`,
+		`kup-count: iifname "ens3" ip daddr 10.244.18.107 udp dport 9987 ct direction original ct status dnat counter`,
+		`kup-count: oifname "ens3" ip saddr 10.244.18.107 udp sport 9987 ct direction reply ct status dnat counter`,
+		`kup-count: iifname "kup-1" ip daddr 10.244.18.107 udp dport 9987 ct direction original ct status dnat counter`,
+		`kup-count: oifname "kup-1" ip saddr 10.244.18.107 udp sport 9987 ct direction reply ct status dnat counter`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("rules:\n%s\nwant:\n%s", join(got), join(want))

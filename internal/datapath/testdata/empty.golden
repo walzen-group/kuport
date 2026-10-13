@@ -17,4 +17,7 @@ table inet kuport {
 	chain kup-mss {
 		type filter hook forward priority mangle; policy accept;
 	}
+	chain kup-count {
+		type filter hook postrouting priority filter; policy accept;
+	}
 }

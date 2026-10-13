@@ -150,6 +150,8 @@ func nftText(r Rule) string {
 		fmt.Fprintf(&b, "%s daddr set %s daddr map @%s counter", l3Text(fam), l3Text(fam), steerMap(fam))
 	case KindMasq:
 		b.WriteString("counter masquerade")
+	case KindCount:
+		b.WriteString("ct status dnat counter")
 	}
 	return b.String()
 }
