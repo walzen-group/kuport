@@ -170,7 +170,9 @@ func collectCounters(ch chan<- prometheus.Metric, snap Snapshot, counters map[da
 			sums[newSeries(descEgressPackets, o.Namespace, o.Egress, o.Pod, family(k.Family), path)] += float64(v.Packets)
 			sums[newSeries(descEgressBytes, o.Namespace, o.Egress, o.Pod, family(k.Family), path)] += float64(v.Bytes)
 		case datapath.ChainMSS:
-			mss += float64(v.Packets)
+			if k.IsMSSClamp() {
+				mss += float64(v.Packets)
+			}
 		}
 	}
 	for s, v := range sums {

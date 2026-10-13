@@ -36,6 +36,15 @@ type LiveRule struct {
 	Counter CounterValue
 }
 
+// IsMSSClamp reports whether the key is kuport's own clamp rule in kup-mss,
+// `oifname "kup-*" tcp flags syn / syn,rst counter tcp option maxseg size set
+// rt mtu`. netbird inserts accept rules for its interface into every filter
+// chain on the forward hook, kup-mss included, and their counters count all of
+// that interface's forwarded traffic.
+func (k LiveKey) IsMSSClamp() bool {
+	return k.Chain == ChainMSS && k.Oif == linkWildcard && k.Proto == "tcp"
+}
+
 // Key is every field but the counter.
 func (l LiveRule) Key() LiveKey { return l.LiveKey }
 

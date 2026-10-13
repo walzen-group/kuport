@@ -53,6 +53,12 @@ func world() fakeSource {
 	qb0Link := datapath.LiveKey{Chain: datapath.ChainEgress, Src: qb0, Mark: 0x6b700003}
 	qb1Blocked := datapath.LiveKey{Chain: datapath.ChainEgress, Src: qb1, Mark: datapath.EgressBlockedMark}
 	mss := datapath.LiveKey{Chain: datapath.ChainMSS, Oif: "kup-*", Proto: "tcp"}
+	// netbird inserts accept rules for its interface into every filter chain
+	// on the forward hook, kup-mss included:
+	//   oifname "wt0" ct state established,related counter accept
+	//   iifname "wt0" counter accept
+	nbOut := datapath.LiveKey{Chain: datapath.ChainMSS, Oif: "wt0"}
+	nbIn := datapath.LiveKey{Chain: datapath.ChainMSS, Iif: "wt0"}
 	return fakeSource{
 		snap: Snapshot{
 			Index: reconcile.MetricsIndex{
@@ -80,6 +86,8 @@ func world() fakeSource {
 			qb0Link:    {Packets: 4, Bytes: 400},
 			qb1Blocked: {Packets: 1, Bytes: 60},
 			mss:        {Packets: 7, Bytes: 420},
+			nbOut:      {Packets: 2, Bytes: 104},
+			nbIn:       {Packets: 3, Bytes: 830},
 		},
 		flows: []*netlink.ConntrackFlow{
 			ctFlow(unix.IPPROTO_TCP, "100.64.0.1", 10002, jfPod.String()),

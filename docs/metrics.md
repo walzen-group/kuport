@@ -83,7 +83,7 @@ relabeling adds `node`, because each agent counts only its own node's rules.
 | kuport_mapping_connections_total | counter | namespace, portmap, interface, family, role | kup-pre, which sees only the first packet of each flow |
 | kuport_mapping_open_flows | gauge | namespace, portmap, role | the node's conntrack table |
 | kuport_egress_packets_total, kuport_egress_bytes_total | counter | namespace, egress, pod, family, path (link, blocked) | kup-egress |
-| kuport_mss_clamped_total | counter | none | kup-mss |
+| kuport_mss_clamped_total | counter | none | kup-mss, the clamp rule only; [datapath.md](datapath.md#mss-clamping) shows the rules netbird adds beside it |
 | kuport_link_info | gauge, 1 | device, slot, class, peer | the Links this node holds a device for |
 | kuport_apply_total | counter | result (ok, error) | each datapath apply |
 | kuport_last_apply_success_timestamp_seconds | gauge | none | each successful apply |

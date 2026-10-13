@@ -102,6 +102,33 @@ func TestTotalsSurviveApplies(t *testing.T) {
 	}
 }
 
+// TestIsMSSClamp parses kuport's clamp rule and the two accept rules netbird
+// inserts into kup-mss. Only kuport's counts as a clamp.
+func TestIsMSSClamp(t *testing.T) {
+	ours := parseLiveRule(ChainMSS, nftExprs(Rule{Chain: ChainMSS, Kind: KindMSS, OifName: linkWildcard}, nil))
+	if !ours.IsMSSClamp() {
+		t.Errorf("kuport's clamp rule parsed as %+v, which IsMSSClamp rejects", ours.LiveKey)
+	}
+	netbird := map[string][]expr.Any{
+		`oifname "wt0" ct state established,related counter accept`: {
+			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1}, ifnameCmp("wt0", false),
+			&expr.Ct{Key: expr.CtKeySTATE, Register: 1},
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: []byte{6, 0, 0, 0}, Xor: []byte{0, 0, 0, 0}},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0, 0, 0, 0}},
+			&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictAccept},
+		},
+		`iifname "wt0" counter accept`: {
+			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1}, ifnameCmp("wt0", false),
+			&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictAccept},
+		},
+	}
+	for text, exprs := range netbird {
+		if k := parseLiveRule(ChainMSS, exprs); k.IsMSSClamp() {
+			t.Errorf("netbird's %s parsed as %+v, which IsMSSClamp accepts", text, k.LiveKey)
+		}
+	}
+}
+
 // TestTotalsCountSharedRuleOnce reads two identical kup-count rules, the pair
 // two PortMaps on one target port render, as one series.
 func TestTotalsCountSharedRuleOnce(t *testing.T) {

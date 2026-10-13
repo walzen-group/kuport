@@ -1049,8 +1049,25 @@ chain kup-mss {
 `rt mtu` is the MTU of the route the packet leaves by, so the rule writes the link's
 figure less the IP and TCP headers. Under an Egress the pod's node clamps the
 pod's SYN and the egress node clamps the site's SYN-ACK. The rule matches every
-`kup-` device, so a PortMap's TCP flows through a link are clamped as well. A
-node with no link has an empty kup-mss.
+`kup-` device, so a PortMap's TCP flows through a link are clamped as well. On
+a node with no link, kuport writes no rule into kup-mss.
+
+netbird inserts accept rules for its interface into every filter chain on the
+forward hook it finds, and kup-mss is one. `nft -a list table inet kuport` on a
+node with no link and netbird running:
+
+```
+chain kup-mss { # handle 6
+	type filter hook forward priority mangle; policy accept;
+	oifname "wt0" ct state established,related counter packets 2 bytes 104 accept # handle 9
+	iifname "wt0" counter packets 3 bytes 830 accept # handle 8
+}
+```
+
+An accept ends only kup-mss. The kernel still runs every other chain on the
+forward hook for the packet, so these rules change no verdict. The next apply
+replaces the table and drops them until netbird inserts them again.
+`kuport_mss_clamped_total` counts only the clamp rule.
 
 `TestEgressOnRealKernel` measured it over a 1300-byte link. TCP_MAXSEG at the
 site reads 1248 over IPv4 and 1228 over IPv6: 1260 and 1240 less the 12-byte
