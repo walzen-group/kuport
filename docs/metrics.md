@@ -171,9 +171,11 @@ kup-count leaves it out.
 
 ## Counters across applies
 
-Each apply deletes and re-adds `table inet kuport` in one transaction, and the
-agent applies on every pass, which any watched change in the cluster starts.
-Every nftables counter restarts at zero each time.
+Each apply deletes and re-adds `table inet kuport` in one transaction, and every
+nftables counter restarts at zero. The agent applies when a pass computes a
+State that differs from the last one, and every 5 minutes (`--resync`) when it
+does not. [architecture.md](architecture.md), "When a pass applies", has the
+rules.
 
 Before each apply, the agent reads the live counters and adds them to running
 totals it holds in memory. A scrape reports the totals plus what the live table

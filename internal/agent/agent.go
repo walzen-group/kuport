@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"reflect"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/vishvananda/netlink"
@@ -95,6 +96,12 @@ type Reconciler struct {
 	// 0 means 4790.
 	LinkPort uint16
 
+	// Repair is how long an unchanged State stays unapplied, the --resync flag.
+	// The first pass after it applies the State again, which puts back a kup-*
+	// device, route or table that something else on the node removed. 0 means
+	// five minutes.
+	Repair time.Duration
+
 	// Now injects the timestamp Compute stamps on conditions; defaults to
 	// metav1.Now. Held here so tests pin it.
 	Now func() metav1.Time
@@ -108,6 +115,11 @@ type Reconciler struct {
 	// lastState fingerprints the last applied datapath state, so an applied
 	// change logs at info and a no-op pass at debug.
 	lastState string
+
+	// applied is the State the last successful apply wrote, nil before one and
+	// after a failure; appliedAt is when.
+	applied   *datapath.State
+	appliedAt time.Time
 
 	// lastIPv6Fwd is the IPv6 forwarding state last logged, nil before the
 	// first read, so the log says it once per change rather than every pass.
@@ -151,10 +163,10 @@ func (r *Reconciler) now() metav1.Time {
 
 // SetupWithManager wires the nine watches to the single whole-node request key.
 // Node stays cluster-wide: host checks read only this node from the cache, but
-// class selection needs every node's labels and InternalIP, so the informer is
-// not filtered. Pods are watched cluster-wide too, because the egress node and
-// every node holding a selected pod compute the same links; a pod update
-// enqueues a pass only when a field the reconcile reads has changed.
+// egress needs every node's pod CIDRs and InternalIP, so the informer is not
+// filtered. Pods are watched cluster-wide too, because the egress node and
+// every node holding a selected pod compute the same links. A pod or Node
+// update enqueues a pass only when a field the reconcile reads has changed.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	toNode := handler.EnqueueRequestsFromMapFunc(
 		func(context.Context, client.Object) []reconcile.Request {
@@ -170,9 +182,42 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.Egress{}, toNode).
 		Watches(&corev1.Pod{}, toNode, builder.WithPredicates(podChanged)).
 		Watches(&discoveryv1.EndpointSlice{}, toNode).
-		Watches(&corev1.Node{}, toNode).
+		Watches(&corev1.Node{}, toNode, builder.WithPredicates(nodeChanged)).
 		Watches(&corev1.Namespace{}, toNode).
 		Complete(r)
+}
+
+// hostPollPeriod is how long a pass waits before the next one when no watched
+// object changes. Interface addresses, IPv6 forwarding and the CNI's mode are
+// read from the host, which no watch reports, so a timed pass picks them up.
+const hostPollPeriod = time.Minute
+
+// nodeChanged passes a Node update only when a field the reconcile reads moved:
+// pod CIDRs, addresses, the Ready condition, or deletion. The kubelet updates
+// its Node every five minutes with fresh heartbeat times, and without this
+// filter every agent ran a pass for every node's report.
+var nodeChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		a, ok1 := e.ObjectOld.(*corev1.Node)
+		b, ok2 := e.ObjectNew.(*corev1.Node)
+		if !ok1 || !ok2 {
+			return true
+		}
+		return !reflect.DeepEqual(a.Spec.PodCIDRs, b.Spec.PodCIDRs) ||
+			!reflect.DeepEqual(a.Status.Addresses, b.Status.Addresses) ||
+			readyStatus(a) != readyStatus(b) ||
+			(a.DeletionTimestamp == nil) != (b.DeletionTimestamp == nil)
+	},
+}
+
+// readyStatus is the status of a Node's Ready condition, empty when it has none.
+func readyStatus(n *corev1.Node) corev1.ConditionStatus {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status
+		}
+	}
+	return ""
 }
 
 // podChanged passes a pod update only when a field the reconcile reads moved.
@@ -235,17 +280,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	r.ready.Store(true)
-	return reconcile.Result{}, nil
+	return reconcile.Result{RequeueAfter: hostPollPeriod}, nil
 }
 
 // applyState renders and applies the desired State, logging an applied change at
 // info and a no-op pass at debug. The datapath's failure mode is a silent drop,
 // so a change always leaves a line saying what was written.
+//
+// A State equal to the last one applied is left alone until Repair has passed
+// since that apply. A failed apply clears the record, so the next pass applies
+// again whatever it computes.
 func (r *Reconciler) applyState(ctx context.Context, st datapath.State) error {
+	now := r.now().Time
+	if r.applied != nil && now.Sub(r.appliedAt) < r.repair() && reflect.DeepEqual(*r.applied, st) {
+		r.Log.V(1).Info("datapath unchanged; apply skipped")
+		return nil
+	}
+	r.applied = nil
 	if err := r.DP.Apply(ctx, st); err != nil {
 		metrics.ApplyTotal.WithLabelValues("error").Inc()
 		return err
 	}
+	r.applied, r.appliedAt = &st, now
 	metrics.ApplyTotal.WithLabelValues("ok").Inc()
 	metrics.LastApplySuccess.SetToCurrentTime()
 	for kind, n := range map[string]int{
@@ -260,7 +316,7 @@ func (r *Reconciler) applyState(ctx context.Context, st datapath.State) error {
 		r.Log.Info("applied datapath state", "state", fp)
 		r.lastState = fp
 	} else {
-		r.Log.V(1).Info("datapath unchanged", "state", fp)
+		r.Log.V(1).Info("datapath reapplied", "state", fp)
 	}
 	return nil
 }
@@ -301,6 +357,14 @@ type hostState struct {
 	linkPort    int
 	underlayMTU int
 	linkMTU     int
+}
+
+// repair is the configured repair period, or the default five minutes.
+func (r *Reconciler) repair() time.Duration {
+	if r.Repair != 0 {
+		return r.Repair
+	}
+	return 5 * time.Minute
 }
 
 // linkPort is the configured link port, or the default 4790.

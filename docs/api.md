@@ -531,7 +531,7 @@ sets them.
 | --- | --- | --- | --- |
 | --node-name | NODE_NAME | none | this node's name; the DaemonSet sets it from spec.nodeName |
 | --log-level | LOG_LEVEL | info | debug, info, warn or error |
-| --resync | RESYNC | 5m | informer resync period |
+| --resync | RESYNC | 5m | informer resync period, and how long an unchanged datapath goes before the agent applies it again ([architecture.md](architecture.md), "When a pass applies") |
 | --health-addr | HEALTH_ADDR | :8081 | address of /healthz and /readyz |
 | --link-port | LINK_PORT | 4790 | UDP port of every return link |
 | --metrics-bind | METRICS_BIND | empty: the node's InternalIP from HOST_IP | where /metrics listens: an interface name such as wt0, or off |

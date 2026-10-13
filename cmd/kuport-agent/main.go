@@ -69,7 +69,7 @@ func parseFlags(args []string, getenv func(string) string) config {
 	nodeName := fs.String("node-name", getenv("NODE_NAME"),
 		"this node's name; the DaemonSet sets it from spec.nodeName via the downward API")
 	logLevel := fs.String("log-level", envOr(getenv, "LOG_LEVEL", "info"), "log level: debug, info, warn, error")
-	resync := fs.Duration("resync", durOr(getenv, "RESYNC", 5*time.Minute), "informer resync period, the level-driven safety net")
+	resync := fs.Duration("resync", durOr(getenv, "RESYNC", 5*time.Minute), "informer resync period, and how long an unchanged datapath goes before the agent applies it again")
 	healthAddr := fs.String("health-addr", envOr(getenv, "HEALTH_ADDR", ":8081"), "address the health and readiness probes bind to")
 	linkPort := fs.Uint("link-port", uintOr(getenv, "LINK_PORT", 4790),
 		"UDP port of every return link; must differ from the CNI's tunnel port, 8472 for Cilium")
@@ -183,6 +183,7 @@ func run(cfg config) error {
 		DP:        dp,
 		Host:      agent.NewHost(mgr.GetAPIReader(), handles.NL),
 		LinkPort:  cfg.linkPort,
+		Repair:    cfg.resync,
 		Log:       log.WithName("reconciler"),
 		Totals:    counters,
 		Conntrack: datapath.HostConntrack,

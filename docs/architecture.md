@@ -43,6 +43,29 @@ this node and applies it in one nftables transaction, so a mapping that was
 deleted disappears by being absent rather than by anything remembering to
 remove it.
 
+### When a pass applies
+
+A pass starts on any change to a watched object, every minute when nothing
+changes, and on each informer resync (`--resync`, 5m). Pod and Node updates
+start one only when a field the reconcile reads moved: a pod's labels, node,
+phase, addresses or deletion, and a Node's pod CIDRs, addresses, Ready status
+or deletion. The kubelet's status report every five minutes moves none of those.
+
+The timed pass re-reads what no watch reports: interface addresses, IPv6
+forwarding and the CNI's mode. Each pass computes the State and compares it with
+the last one applied:
+
+| Computed State | Last successful apply | Agent |
+| --- | --- | --- |
+| differs from the last one applied | any | applies it |
+| equal to the last one applied | less than `--resync` ago | skips the apply and writes status |
+| equal to the last one applied | `--resync` ago or longer | applies it again |
+| any | the last apply failed | applies it |
+
+The apply after `--resync` puts back a kup- device, route, rule or table that
+something else on the node removed. A skipped apply logs
+`datapath unchanged; apply skipped` at debug.
+
 Every agent resolves every PortMap from the same shared inputs, then emits only
 the objects this node owns.
 

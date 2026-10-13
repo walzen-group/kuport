@@ -57,18 +57,18 @@ kuport owns exactly the objects it names:
 | stand-in addresses | 169.254.76.0/24 and fd6b:7570::/96; no node holds one, and the link pool's 169.254.64.0/21 stays clear of the IPv4 block |
 | vxlan links | `kup-<n>`, n the slot of the link's Link object, 0 to 1023 |
 | link addresses | the /31 from 169.254.64.0/21 and, for IPv6 delivery, the /127 from fd64:f5ac:e961::1:0/112 on a kup- link; any other global IPv6 address on it is removed, the kernel's link-local one is kept |
-| routing tables | 10000 + slot, 10000 to 11023, in IPv4 and IPv6; 11024, which holds only `blackhole default` while a fail-closed Egress pod is blocked, and which every pass reconciles whether or not the plan names it |
+| routing tables | 10000 + slot, 10000 to 11023, in IPv4 and IPv6; 11024, which holds only `blackhole default` while a fail-closed Egress pod is blocked, and which every apply reconciles whether or not the plan names it |
 | routing rules | pref 101 loop guard (IPv4 only) and pref 102 divert (IPv4 and IPv6) for a PortMap's return path and an egress node's replies; on an Egress pod's node, pref 32763 loop guard (IPv4 only), 32764 `lookup main suppress_prefixlength 0` and 32765 divert. Any rule whose mark is 0x6b70xxxx is kuport's; a slot's mark keeps bits 8-11 clear for Cilium (decisions.md, "Link address allocation"), and a blocked Egress pod's mark is 0x6b70f000 |
-| masquerade and mark rules | inside kuport's own chains, which are rewritten whole each pass |
+| masquerade and mark rules | inside kuport's own chains, which are rewritten whole on each apply |
 
-Every pass rewrites the whole table in one transaction. Links, rules and routes
+Every apply rewrites the whole table in one transaction. Links, rules and routes
 are reconciled by comparison, since they have no transaction. Anything the agent
 finds under its own names and does not want is removed.
 
 A link device is corrected in place where the kernel allows it. Its endpoint
 addresses and its MTU can be changed on a running device; its VNI and destination
 port cannot, and those rebuild it. A rebuild drops the /31, the /127 and every
-route pointing at the old index, which the same pass restores.
+route pointing at the old index, which the same apply restores.
 
 A kernel booted without IPv6 answers an IPv6 rule or route listing with
 EAFNOSUPPORT. The agent skips the IPv6 half of the reconcile there whenever
