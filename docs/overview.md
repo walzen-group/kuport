@@ -5,8 +5,8 @@ the client's source address, and lets the workload ask for that itself. In the
 other direction, an Egress sends the connections a selected pod opens out of
 one chosen node's address.
 
-Status: v0.9.2, 2026-10-13. In production, PortMaps deliver TCP to Jellyfin
-and InfluxDB. On the test cluster, both serving modes were verified across
+Status: v0.9.2, 2026-10-13. In production, PortMaps deliver TCP to services
+such as Jellyfin and InfluxDB, and UDP to TeamSpeak and ZeroTier. On the test cluster, both serving modes were verified across
 every entry point in UDP and TCP with the client's address intact on each
 reply, cross-node included. Every rule in [the datapath](datapath.md) carried
 real traffic by hand before it was written down, and each one names the

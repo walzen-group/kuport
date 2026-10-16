@@ -39,7 +39,7 @@ address, while traffic to the cluster, the LAN and mesh peers keeps its route.
 kuport has run on the maintainers' test and production clusters since
 September 2026. Both run Talos nodes spread across sites, joined by a netbird
 WireGuard mesh, with Cilium in tunnel mode. In production, PortMaps deliver TCP
-to Jellyfin and InfluxDB. The test cluster serves UDP to an Insurgency Sandstorm game server and
+to services such as Jellyfin and InfluxDB, and UDP to TeamSpeak and ZeroTier. The test cluster serves UDP to an Insurgency Sandstorm game server and
 runs the echo fixtures that cover both serving modes over TCP and UDP.
 
 GitHub Actions runs the unit, golden and envtest suites on every push. The
