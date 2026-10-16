@@ -277,13 +277,13 @@ bytes. Fragmentation puts two packets on the wire for one and loses the whole
 datagram when either half is lost, so treat it as what keeps a mistake from
 becoming an outage rather than as a size to design for.
 
-Cilium carries a separate limit, and kuport's traffic does not meet it. Cilium
-sets a pod's interface MTU to the underlay MTU rather than 50 below, so a pod
-is told 50 more than it can send to a pod on another node, and Cilium's eBPF
-egress discards the excess with no signal. Traffic through a mapping takes
-neither of those paths: a reply leaves the pod onto its own node's host stack
-and goes out the return link, and an inbound packet reaches the pod through the
-host's forwarding path. A workload that also talks pod to pod meets the limit
+Cilium sets a separate limit, and kuport's traffic does not meet it. Cilium
+leaves a pod's interface at the underlay MTU and gives the pod's default route
+an MTU 50 below it. A datagram to a pod on another node that exceeds the route
+MTU is fragmented by the pod's own stack before it enters the tunnel, and
+arrives as two packets. Traffic through a mapping never uses that route: a
+reply leaves the pod onto its own node's host stack and goes out the return
+link, and an inbound packet reaches the pod through the host's forwarding path. A workload that also talks pod to pod meets the limit
 there and should keep that traffic under `linkMTU`.
 
 ## Egress

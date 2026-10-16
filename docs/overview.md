@@ -5,13 +5,14 @@ the client's source address, and lets the workload ask for that itself. In the
 other direction, an Egress sends the connections a selected pod opens out of
 one chosen node's address.
 
-Status: v0.4.0, 2026-09-08. Both serving modes carry traffic on the test
-cluster, verified across every entry point in UDP and TCP with the client's
-address intact on each reply, cross-node included. Every rule in
-[the datapath](datapath.md) carried real traffic by hand before it was written
-down, and each one names the measurement that confirmed it. IPv6 delivery came
-after: the datapath tests load its rules into a kernel, and it has not yet
-carried traffic on a cluster.
+Status: v0.9.2, 2026-10-13. In production, PortMaps deliver TCP to Jellyfin
+and InfluxDB. On the test cluster, both serving modes were verified across
+every entry point in UDP and TCP with the client's address intact on each
+reply, cross-node included. Every rule in [the datapath](datapath.md) carried
+real traffic by hand before it was written down, and each one names the
+measurement that confirmed it. IPv6 delivery arrived in v0.6.0: the datapath
+tests load its rules into a kernel, and no PortMap on either cluster uses it
+yet.
 
 ## The problem
 
