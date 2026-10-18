@@ -145,9 +145,17 @@ lints and renders the Helm chart and dry-run applies the render against the API
 schemas.
 
 `chart/crds/` and `deploy/crds/` are hand-kept copies of `config/crd/`.
-`make manifests` writes only `config/crd/`, so a schema change needs
-`cp config/crd/*.yaml chart/crds/ deploy/crds/` as well, and `make verify` fails
-until both copies match. The release renders its install manifest from
+`make manifests` writes only `config/crd/`, so after a schema change copy the
+files into each directory with its own cp, and `make verify` fails until both
+copies match:
+
+```sh
+cp config/crd/*.yaml chart/crds/
+cp config/crd/*.yaml deploy/crds/
+```
+
+A single cp with both directories copies into deploy/crds/ only and exits with
+"omitting directory" on chart/crds/. The release renders its install manifest from
 `deploy/`, and v0.6.0 shipped the v0.5.0 schema because that copy was missed.
 
 **release.yaml**, on a tag matching `v*` (plain semver; suffixes are rejected):

@@ -330,7 +330,7 @@ has finished, or belongs to an earlier Egress.
 | EgressConflict | Programmed | False | an earlier Egress selects some of these pods (the message names them) and decides their path | `kubectl -n <ns> get egress` and compare the selectors; narrow one of them |
 | PodCIDRsUnknown | Programmed | False | a Node has no `spec.podCIDRs`, so the agents cannot build the cluster sets and program no path | the command below; the CNI's IPAM has to fill the field, which Cilium does with `ipam.mode: kubernetes` |
 | SubnetExhausted | Programmed | False | all 1024 slots of the link pool are taken | `kubectl get links` |
-| ReturnPathUnavailable | Programmed | False | `no link to <node> yet for <pods>`: the pair's Link does not exist yet, or the EgressClass has no row from the egress node or the pod's node | `kubectl get links`, then `kubectl get egressclass <name> -o jsonpath='{.status.nodes}'`; a row missing for more than a pass or two means that node runs no agent |
+| ReturnPathUnavailable | Programmed | False | `the path to <node> is down for <pods>: no Link yet, a node not ready, or a class row missing or not ready`: the pair's Link does not exist yet, the egress node or the pod's node has Ready False or Unknown, or the EgressClass has no ready row from one of those two nodes | `kubectl get nodes`, then `kubectl get links`, then `kubectl get egressclass <name> -o jsonpath='{.status.nodes}'`; a row missing for more than a pass or two means that node runs no agent |
 
 When several false reasons apply, Programmed reports the first in table order.
 A node without pod CIDRs shows up in:
